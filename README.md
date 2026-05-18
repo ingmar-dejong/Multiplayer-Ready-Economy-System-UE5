@@ -4,6 +4,8 @@ This repository is a curated portfolio showcase of a gameplay economy slice buil
 
 It focuses on a data-driven economy loop with inventory-backed items, world processing stations, UI flows, and server-authoritative multiplayer behavior. The original implementation was developed inside a larger simulation project; this repository isolates the economy-related code that is most relevant from a gameplay systems and engineering perspective.
 
+Link to showcase: https://onedrive.live.com/?id=%2Fpersonal%2F9d9f3cd318aeacbc%2FDocuments%2FPortfolio%2F2%2E%20Slice%20of%20Economy%20Processing%20Station%20%28Co%2Dop%29&viewid=b61252c1%2D4089%2D4b48%2Dba1f%2D36bf4fdf86eb
+
 ## What This Showcase Covers
 
 - Economy orchestration through a central gameplay component
