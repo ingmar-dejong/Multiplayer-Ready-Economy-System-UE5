@@ -13,6 +13,8 @@ class VAMPIREEMPIRE_API UBloodProductItem : public UOwnSystemItem
 public:
 	UBloodProductItem();
 	virtual void GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual void AddedToInventory(class UOwnSystemInventoryComponent* Inventory, const bool bFromLoad) override;
+	virtual void PostInventoryLoaded() override;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, ReplicatedUsing = OnRep_BloodPresentationData, Category = "Blood")
 	EBloodSourceType SourceType = EBloodSourceType::Rat;
@@ -46,6 +48,7 @@ public:
 	static FText GetProcessingDisplayName(EBloodProcessingType InProcessingType);
 
 	virtual FText GetRawDescription_Implementation() override;
+	virtual FString GetStringVariable_Implementation(const FString& VariableName) override;
 
 	void RefreshPresentation();
 

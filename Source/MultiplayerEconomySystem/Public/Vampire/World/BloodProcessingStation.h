@@ -3,11 +3,14 @@
 #include "CoreMinimal.h"
 #include "Engine/EngineTypes.h"
 #include "GameFramework/Actor.h"
+#include "OwnSystemSavableActor.h"
 #include "GameplayTagContainer.h"
+#include "UI/ProcessingStationMenuBase.h"
 #include "Vampire/BloodTypes.h"
 #include "BloodProcessingStation.generated.h"
 
 class UBloodProcessingAttachmentDataAsset;
+class UPlaceableStationDataAsset;
 class UBloodProcessingInteractableComponent;
 class UBloodProcessingRecipeDataAsset;
 class UBloodProductItem;
@@ -22,8 +25,39 @@ class UStaticMeshComponent;
 class UVampireBarrelMenu;
 class UVampireEconomyComponent;
 class UVampireEconomySummaryMenu;
+class AStationPlacementPreviewActor;
+class AWorkspaceRoom;
 class APlayerController;
 class APawn;
+class ULocalPlayer;
+struct FWorkspacePlacedStationRecord;
+
+USTRUCT(BlueprintType)
+struct FProcessingStationMovePreviewState
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	bool bActive = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	bool bValidPlacement = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	FName RoomId;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	TObjectPtr<AWorkspaceRoom> WorkspaceRoom;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	FIntPoint AnchorCell = FIntPoint::ZeroValue;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	int32 RotationQuarterTurns = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	TObjectPtr<UPlaceableStationDataAsset> StationDefinition;
+};
 
 USTRUCT(BlueprintType)
 struct FProcessingStationAttachmentSlot
@@ -74,13 +108,18 @@ struct FBloodProcessingStartRequest
 };
 
 UCLASS()
-class VAMPIREEMPIRE_API ABloodProcessingStation : public AActor
+class VAMPIREEMPIRE_API ABloodProcessingStation : public AActor, public IOwnSystemSavableActor
 {
 	GENERATED_BODY()
 
 public:
 	ABloodProcessingStation();
 	virtual void GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual void PrepareForSave_Implementation() override;
+	virtual void Load_Implementation() override;
+	virtual bool ShouldRespawn_Implementation() const override;
+	virtual void SetActorGUID_Implementation(const FGuid& SavedGUID) override;
+	virtual FGuid GetActorGUID_Implementation() const override;
 	virtual bool RequiresManualProcessingFlow() const;
 	virtual void Tick(float DeltaSeconds) override;
 
@@ -125,6 +164,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Processing")
 	void ClearStagedManualProcessingRequest();
+
+	UFUNCTION(BlueprintCallable, Category = "Processing|Manual")
+	virtual bool CancelManualProcessingRequest(FText& OutReason);
 
 	UFUNCTION(BlueprintCallable, Category = "Processing|Manual")
 	virtual void HandleAbandonedManualFlow();
@@ -201,6 +243,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Processing|Input")
 	void RemoveInteractionInputContext(APlayerController* PlayerController);
 
+	UFUNCTION(BlueprintCallable, Category = "Processing|Input")
+	void RemoveInteractionHotkeys(APlayerController* PlayerController);
+
 	UFUNCTION(BlueprintCallable, Category = "Processing|Manual")
 	void SetActiveInteractorContext(APawn* InInteractor);
 
@@ -215,6 +260,45 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Processing|Authority")
 	bool IsCurrentOperator(const APawn* InInteractor) const;
+
+	UFUNCTION(BlueprintCallable, Category = "Processing|Placement")
+	bool TryBeginMovePlacement(APawn* InInteractor, FText& OutReason);
+
+	UFUNCTION(BlueprintCallable, Category = "Processing|Placement")
+	void EndMovePlacement(APawn* InInteractor);
+
+	UFUNCTION(BlueprintCallable, Category = "Processing|Placement")
+	void UpdateMovePlacementPreview(AWorkspaceRoom* PreviewWorkspaceRoom, FIntPoint PreviewAnchorCell, int32 PreviewRotationQuarterTurns, bool bPreviewIsValid, UPlaceableStationDataAsset* PreviewStationDefinition);
+
+	UFUNCTION(BlueprintPure, Category = "Processing|Placement")
+	bool IsMovePlacementInProgress() const { return bMovePlacementInProgress; }
+
+	UFUNCTION(BlueprintCallable, Category = "Processing|Placement")
+	void SetPlacementContext(AWorkspaceRoom* InWorkspaceRoom, const FGuid& InPlacedStationInstanceId, const FName& InOwningRoomId, FIntPoint InGridAnchorCell, int32 InRotationQuarterTurns);
+
+	UFUNCTION(BlueprintPure, Category = "Processing|Placement")
+	const FGuid& GetPlacedStationInstanceId() const { return PlacedStationInstanceId; }
+
+	UFUNCTION(BlueprintPure, Category = "Processing|Placement")
+	AWorkspaceRoom* GetOwningWorkspaceRoom() const;
+
+	UFUNCTION(BlueprintPure, Category = "Processing|Placement")
+	bool HasRegisteredPlacementContext() const;
+
+	UFUNCTION(BlueprintCallable, Category = "Processing|Placement")
+	bool EnsurePlacementRecordForCurrentTransform(FText& OutReason);
+
+	bool TryBuildPlacementRecordForWorkspace(
+		AWorkspaceRoom* CandidateWorkspaceRoom,
+		FWorkspacePlacedStationRecord& OutPlacementRecord,
+		FText& OutReason) const;
+
+	bool TryInferCurrentPlacementContext(
+		AWorkspaceRoom*& OutWorkspaceRoom,
+		FIntPoint& OutAnchorCell,
+		int32& OutRotationQuarterTurns,
+		const UPlaceableStationDataAsset*& OutPlacementDefinition,
+		FText& OutReason) const;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<USceneComponent> SceneRoot;
@@ -244,13 +328,46 @@ public:
 	int32 SelectedRecipeIndex = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|UI")
-	TSubclassOf<UVampireBarrelMenu> BarrelMenuClass;
+	TSubclassOf<UProcessingStationMenuBase> ProcessingMenuClass;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|UI")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|UI", meta = (DeprecatedProperty, DeprecationMessage = "Use ProcessingMenuClass instead."))
+	TSubclassOf<UProcessingStationMenuBase> BarrelMenuClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|UI", meta = (DeprecatedProperty, DeprecationMessage = "StationMenuClass is no longer used. Processing stations now open via ProcessingMenuClass only."))
 	TSubclassOf<UVampireEconomySummaryMenu> StationMenuClass;
+
+	UFUNCTION(BlueprintPure, Category = "Processing|UI")
+	TSubclassOf<UProcessingStationMenuBase> GetResolvedProcessingMenuClass() const;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, SaveGame, Category = "Processing")
 	FText StationDisplayName;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	TObjectPtr<UPlaceableStationDataAsset> PlacementDefinitionOverride;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	bool bRegisterAsPlacedStationOnBeginPlay = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|Placement")
+	TObjectPtr<AWorkspaceRoom> WorkspaceRoomOverride;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, ReplicatedUsing = OnRep_PlacementState, Category = "Processing|Placement")
+	FGuid PlacedStationInstanceId;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, ReplicatedUsing = OnRep_PlacementState, Category = "Processing|Placement")
+	FName OwningRoomId;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, ReplicatedUsing = OnRep_PlacementState, Category = "Processing|Placement")
+	FIntPoint GridAnchorCell = FIntPoint::ZeroValue;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, ReplicatedUsing = OnRep_PlacementState, Category = "Processing|Placement")
+	int32 RotationQuarterTurns = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Save")
+	FGuid SavedActorGuid;
+
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AWorkspaceRoom> OwningWorkspaceRoom;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|Camera")
 	bool bUseInteractionCamera = true;
@@ -269,6 +386,9 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|Manual")
 	TSubclassOf<AActor> ManualPreviewActorClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|Manual")
+	FName ManualPreviewSpawnPointComponentName;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Processing|Manual", meta = (UseComponentPicker, AllowedClasses = "/Script/Engine.SceneComponent"))
 	FComponentReference ManualPreviewSpawnPoint;
@@ -306,6 +426,12 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Transient, Replicated, Category = "Processing|Authority")
 	TObjectPtr<APawn> CurrentOperator;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Transient, ReplicatedUsing = OnRep_MovePlacementState, Category = "Processing|Placement")
+	bool bMovePlacementInProgress = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Transient, ReplicatedUsing = OnRep_MovePreviewState, Category = "Processing|Placement")
+	FProcessingStationMovePreviewState MovePreviewState;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Transient, Category = "Processing|Manual")
 	TObjectPtr<UInteractionPlacementTargetComponent> ResolvedManualPlacementTarget;
 
@@ -314,16 +440,48 @@ public:
 
 protected:
 	UFUNCTION()
+	void OnRep_PlacementState();
+
+	UFUNCTION()
+	void OnRep_MovePlacementState();
+
+	UFUNCTION()
+	void OnRep_MovePreviewState();
+
+	UFUNCTION()
 	void HandleManualPlacementConfirmed(UInteractionPlacementTargetComponent* TargetComponent, UManipulatableObjectComponent* ManipulatedObject);
+
+	bool AddBloodItemFromRequestToInventory(
+		UOwnSystemInventoryComponent* Inventory,
+		const FBloodProcessingStartRequest& Request,
+		EBloodProcessingType ResultProcessingType,
+		bool bMarkAsPackaged,
+		EBloodProcessingType SourceProcessingType,
+		UBloodProductItem*& OutInventoryItem,
+		FText& OutReason) const;
 
 	UInteractionPlacementTargetComponent* ResolveManualPlacementTarget() const;
 	USceneComponent* ResolveManualPreviewSpawnPoint() const;
+	void BootstrapEditorPlacedStationPlacement();
+	bool ValidateManualPreviewSetup(FText& OutReason) const;
 	bool SpawnManualPreviewActorForRequest(const FBloodProcessingStartRequest& Request, FText& OutReason);
 	void DestroyManualPreviewActor();
 	void HandleInteractionCancelPressed();
 	void HandleDebugForceOperatorUnpossessPressed();
 
 private:
+	bool InferPlacementStateFromCurrentTransform(
+		AWorkspaceRoom*& OutWorkspaceRoom,
+		FIntPoint& OutAnchorCell,
+		int32& OutRotationQuarterTurns,
+		const UPlaceableStationDataAsset*& OutPlacementDefinition,
+		FText& OutReason) const;
+	const UPlaceableStationDataAsset* ResolvePlacementDefinitionForBootstrap() const;
+	AWorkspaceRoom* ResolveOwningWorkspaceRoomFromReplicatedState() const;
+	void RefreshPlacementTransformFromReplicatedState();
+	AWorkspaceRoom* ResolveWorkspaceRoomById(FName RoomIdToFind) const;
+	void SyncMovePreviewActor();
+	void DestroyMovePreviewActor();
 	USceneComponent* ResolveAttachmentAnchor(const FProcessingStationAttachmentSlot& Slot) const;
 	UStaticMeshComponent* FindOrCreateAttachmentMeshComponent(FProcessingStationAttachmentSlot& Slot);
 	void RefreshAttachmentVisuals();
@@ -336,4 +494,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<APlayerController> InteractionHotkeyPlayerController;
+
+	UPROPERTY(Transient)
+	TObjectPtr<AStationPlacementPreviewActor> MovePreviewActor;
+
+	static TMap<TWeakObjectPtr<ULocalPlayer>, TMap<TObjectPtr<UInputMappingContext>, int32>> SharedInteractionMappingContextRefs;
 };

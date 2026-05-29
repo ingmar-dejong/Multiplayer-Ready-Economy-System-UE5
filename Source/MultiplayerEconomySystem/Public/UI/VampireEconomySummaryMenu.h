@@ -10,18 +10,10 @@ class UOwnSystemCommonButtonBase;
 class UOwnSystemInventoryComponent;
 class UVampireEconomyComponent;
 class UBloodProductItem;
-class UBloodProcessingRecipeDataAsset;
-class ABloodProcessingStation;
+class UPlaceableStationItem;
+class AWorkspaceRoom;
 class ABloodBuyerNPC;
 class APawn;
-
-UENUM(BlueprintType)
-enum class EVampireProcessingMode : uint8
-{
-	Snel UMETA(DisplayName = "Snel"),
-	Voorzichtig UMETA(DisplayName = "Voorzichtig"),
-	Luxe UMETA(DisplayName = "Luxe")
-};
 
 UCLASS(Blueprintable)
 class VAMPIREEMPIRE_API UVampireEconomySummaryMenu : public UOwnSystemMenu
@@ -30,9 +22,6 @@ class VAMPIREEMPIRE_API UVampireEconomySummaryMenu : public UOwnSystemMenu
 
 public:
 	UVampireEconomySummaryMenu();
-
-	UFUNCTION(BlueprintCallable, Category = "Vampire|UI")
-	void SetProcessingStationContext(ABloodProcessingStation* InStation, APawn* InInteractor);
 
 	UFUNCTION(BlueprintCallable, Category = "Vampire|UI")
 	void SetBuyerContext(ABloodBuyerNPC* InBuyer, APawn* InInteractor);
@@ -54,9 +43,6 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Vampire|UI")
 	FText BuildSelectedThrallText() const;
-
-	UFUNCTION(BlueprintPure, Category = "Vampire|UI")
-	FText BuildSelectedProcessingModeText() const;
 
 protected:
 	virtual void NativeConstruct() override;
@@ -80,9 +66,6 @@ protected:
 	TObjectPtr<UOwnSystemCommonTextBlock> TxtSelectedThrall;
 
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "Vampire|UI")
-	TObjectPtr<UOwnSystemCommonTextBlock> TxtSelectedProcessingMode;
-
-	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "Vampire|UI")
 	TObjectPtr<UOwnSystemCommonButtonBase> BtnPrevBloodItem;
 
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "Vampire|UI")
@@ -90,12 +73,6 @@ protected:
 
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "Vampire|UI")
 	TObjectPtr<UOwnSystemCommonButtonBase> BtnProcessSelected;
-
-	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "Vampire|UI")
-	TObjectPtr<UOwnSystemCommonButtonBase> BtnPrevProcessingMode;
-
-	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "Vampire|UI")
-	TObjectPtr<UOwnSystemCommonButtonBase> BtnNextProcessingMode;
 
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Category = "Vampire|UI")
 	TObjectPtr<UOwnSystemCommonButtonBase> BtnPrevThrall;
@@ -126,8 +103,6 @@ private:
 	void HandleAddThrallClicked();
 	void HandlePrevBloodItemClicked();
 	void HandleNextBloodItemClicked();
-	void HandlePrevProcessingModeClicked();
-	void HandleNextProcessingModeClicked();
 	void HandleProcessSelectedClicked();
 	void HandlePrevThrallClicked();
 	void HandleNextThrallClicked();
@@ -140,11 +115,6 @@ private:
 	TArray<UBloodProductItem*> GetBloodItems() const;
 	UBloodProductItem* GetSelectedBloodItem() const;
 	void ClampSelectedBloodItemIndex();
-	EVampireProcessingMode GetSelectedProcessingMode() const;
-	void StepSelectedProcessingMode(int32 Direction);
-	FText GetProcessingModeDisplayName(EVampireProcessingMode Mode) const;
-	FText GetProcessingModeDescription(EVampireProcessingMode Mode) const;
-	bool CreateTemporaryRecipeForSelectedMode(UBloodProcessingRecipeDataAsset*& OutRecipe) const;
 	bool IsInBuyerContext() const;
 	void GetBuyerCandidateGroups(TArray<UBloodProductItem*>& OutRepresentatives, TArray<int32>& OutTotalUnits) const;
 	int32 GetSelectedBuyerGroupUnits() const;
@@ -152,6 +122,9 @@ private:
 	FText GetBuyerPrimaryActionText() const;
 	void UpdateButtonStateForCurrentContext();
 	bool HandleBuyerSellAction();
+	bool HandleDebugPlaceFirstStation();
+	UPlaceableStationItem* GetFirstPlaceableStationItem() const;
+	AWorkspaceRoom* FindFirstWorkspaceRoom() const;
 	int32 GetThrallCount() const;
 	const FThrallUpkeepUnit* GetSelectedThrall() const;
 	void ClampSelectedThrallIndex();
@@ -170,9 +143,6 @@ private:
 
 	UPROPERTY(Transient)
 	int32 SelectedBloodItemIndex = 0;
-
-	UPROPERTY(Transient)
-	int32 SelectedProcessingModeIndex = 0;
 
 	UPROPERTY(Transient)
 	int32 SelectedThrallIndex = 0;

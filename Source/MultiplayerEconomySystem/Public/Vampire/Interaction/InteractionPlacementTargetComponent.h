@@ -83,8 +83,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Manipulation")
 	bool bUseTriggerVolume = false;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Manipulation")
+	FName TriggerVolumeComponentName;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Manipulation", meta = (UseComponentPicker, AllowedClasses = "/Script/Engine.PrimitiveComponent"))
 	FComponentReference TriggerVolume;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Manipulation")
+	bool bAutoConfigureTriggerVolumeCollision = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Manipulation", meta = (ClampMin = 0.0))
 	float PositionTolerance = 18.0f;
@@ -151,5 +157,8 @@ private:
 		UPrimitiveComponent* OtherComp,
 		int32 OtherBodyIndex);
 
+	UPrimitiveComponent* ResolveTriggerVolumeComponent() const;
+	bool IsUsableTriggerVolumeCandidate(const UPrimitiveComponent* CandidateComponent) const;
+	void ConfigureResolvedTriggerVolume();
 	UManipulatableObjectComponent* ResolveManipulatableFromOverlap(AActor* OtherActor, UPrimitiveComponent* OtherComp) const;
 };

@@ -33,6 +33,7 @@ public:
 	virtual bool RequiresManualProcessingFlow() const override;
 	virtual bool CanAcceptBloodItem(const UBloodProductItem* BloodItem, int32 TotalAvailableUnits, FText& OutReason) const override;
 	virtual bool PrepareManualProcessingRequest(const UBloodProductItem* BloodItem, int32 TotalAvailableUnits, FText& OutReason) override;
+	virtual bool CancelManualProcessingRequest(FText& OutReason) override;
 	virtual void HandleAbandonedManualFlow() override;
 
 	UFUNCTION(BlueprintCallable, Category = "Processing|Packaging")
@@ -40,9 +41,6 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Processing|Packaging")
 	bool TryCommitPackagedBatch(FText& OutReason);
-
-	UFUNCTION(BlueprintCallable, Category = "Processing|Packaging")
-	bool CancelReservedPackagingRequest(FText& OutReason);
 
 	UFUNCTION(BlueprintCallable, Category = "Processing|Packaging")
 	bool ConfirmPackagingPlacement(int32 SlotIndex, FText& OutReason);

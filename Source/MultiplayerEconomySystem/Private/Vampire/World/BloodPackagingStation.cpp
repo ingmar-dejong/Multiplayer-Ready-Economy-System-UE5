@@ -61,50 +61,6 @@ namespace
 		return RemainingUnits <= 0;
 	}
 
-	bool AddBloodItemFromRequestToInventory(
-		UOwnSystemInventoryComponent* Inventory,
-		const FBloodProcessingStartRequest& Request,
-		const EBloodProcessingType ResultProcessingType,
-		const bool bMarkAsPackaged,
-		const EBloodProcessingType SourceProcessingType,
-		UBloodProductItem*& OutInventoryItem,
-		FText& OutReason)
-	{
-		OutInventoryItem = nullptr;
-		OutReason = FText::GetEmpty();
-
-		if (!Inventory || !Request.ItemClass)
-		{
-			OutReason = NSLOCTEXT("BloodPackagingStation", "PackagingRestoreMissingInventory", "Inventory of batchdata ontbreekt voor deze packaging-actie.");
-			return false;
-		}
-
-		const FItemAddResult AddResult = Inventory->TryAddItemFromClass(Request.ItemClass, 1, false);
-		if (AddResult.AmountGiven <= 0 || AddResult.Stacks.IsEmpty())
-		{
-			OutReason = NSLOCTEXT("BloodPackagingStation", "PackagingRestoreAddFailed", "Het blood item kon niet aan de inventory worden toegevoegd.");
-			return false;
-		}
-
-		UBloodProductItem* InventoryItem = Cast<UBloodProductItem>(AddResult.Stacks[0]);
-		if (!InventoryItem)
-		{
-			OutReason = NSLOCTEXT("BloodPackagingStation", "PackagingRestoreWrongItemClass", "De inventory output heeft een ongeldige item class.");
-			return false;
-		}
-
-		InventoryItem->SourceType = Request.SourceType;
-		InventoryItem->BaseQuality = Request.BaseQuality;
-		InventoryItem->ProcessingType = ResultProcessingType;
-		InventoryItem->bHasPackagedSourceProcessing = bMarkAsPackaged;
-		InventoryItem->PackagedSourceProcessingType = bMarkAsPackaged ? SourceProcessingType : EBloodProcessingType::Vers;
-		InventoryItem->BloodQuantity = Request.BloodQuantity;
-		InventoryItem->CreatedDay = Request.CreatedDay;
-		InventoryItem->RefreshPresentation();
-
-		OutInventoryItem = InventoryItem;
-		return true;
-	}
 }
 
 #define LOCTEXT_NAMESPACE "BloodPackagingStation"
@@ -385,7 +341,7 @@ bool ABloodPackagingStation::TryCommitPackagedBatch(FText& OutReason)
 	return true;
 }
 
-bool ABloodPackagingStation::CancelReservedPackagingRequest(FText& OutReason)
+bool ABloodPackagingStation::CancelManualProcessingRequest(FText& OutReason)
 {
 	OutReason = FText::GetEmpty();
 	RefreshPackagingPlacementState();

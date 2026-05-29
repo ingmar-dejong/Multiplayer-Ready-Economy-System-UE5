@@ -35,17 +35,20 @@ void UInteractionPlacementTargetComponent::BeginPlay()
 		return;
 	}
 
-	ResolvedTriggerVolume = Cast<UPrimitiveComponent>(TriggerVolume.GetComponent(GetOwner()));
+	ResolvedTriggerVolume = ResolveTriggerVolumeComponent();
 	if (!ResolvedTriggerVolume)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("PlacementTarget: BeginPlay target=%s trigger-volume mode enabled but no trigger volume resolved"), *GetNameSafe(this));
 		return;
 	}
 
+	ConfigureResolvedTriggerVolume();
+
 	ResolvedTriggerVolume->OnComponentBeginOverlap.RemoveDynamic(this, &UInteractionPlacementTargetComponent::HandleTriggerVolumeBeginOverlap);
 	ResolvedTriggerVolume->OnComponentBeginOverlap.AddDynamic(this, &UInteractionPlacementTargetComponent::HandleTriggerVolumeBeginOverlap);
 	ResolvedTriggerVolume->OnComponentEndOverlap.RemoveDynamic(this, &UInteractionPlacementTargetComponent::HandleTriggerVolumeEndOverlap);
 	ResolvedTriggerVolume->OnComponentEndOverlap.AddDynamic(this, &UInteractionPlacementTargetComponent::HandleTriggerVolumeEndOverlap);
+	ResolvedTriggerVolume->UpdateOverlaps();
 }
 
 void UInteractionPlacementTargetComponent::OnRegister()
@@ -492,6 +495,108 @@ void UInteractionPlacementTargetComponent::HandleTriggerVolumeEndOverlap(
 	{
 		RemovePlacedObject();
 	}
+}
+
+UPrimitiveComponent* UInteractionPlacementTargetComponent::ResolveTriggerVolumeComponent() const
+{
+	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return nullptr;
+	}
+
+	if (UPrimitiveComponent* ReferencedComponent = Cast<UPrimitiveComponent>(TriggerVolume.GetComponent(Owner)))
+	{
+		if (ReferencedComponent->GetOwner() == Owner)
+		{
+			return ReferencedComponent;
+		}
+	}
+
+	TArray<UPrimitiveComponent*> PrimitiveComponents;
+	Owner->GetComponents<UPrimitiveComponent>(PrimitiveComponents);
+
+	if (!TriggerVolumeComponentName.IsNone())
+	{
+		for (UPrimitiveComponent* PrimitiveComponent : PrimitiveComponents)
+		{
+			if (PrimitiveComponent && PrimitiveComponent->GetFName() == TriggerVolumeComponentName)
+			{
+				return PrimitiveComponent;
+			}
+		}
+
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("PlacementTarget: TriggerVolumeComponentName did not match any primitive component target=%s owner=%s componentName=%s"),
+			*GetNameSafe(this),
+			*GetNameSafe(Owner),
+			*TriggerVolumeComponentName.ToString());
+	}
+
+	for (UPrimitiveComponent* PrimitiveComponent : PrimitiveComponents)
+	{
+		if (!IsUsableTriggerVolumeCandidate(PrimitiveComponent) || !PrimitiveComponent->IsAttachedTo(this))
+		{
+			continue;
+		}
+
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("PlacementTarget: Auto-resolved attached trigger volume target=%s trigger=%s"),
+			*GetNameSafe(this),
+			*GetNameSafe(PrimitiveComponent));
+		return PrimitiveComponent;
+	}
+
+	for (UPrimitiveComponent* PrimitiveComponent : PrimitiveComponents)
+	{
+		if (!IsUsableTriggerVolumeCandidate(PrimitiveComponent))
+		{
+			continue;
+		}
+
+		const FString ComponentName = PrimitiveComponent->GetName();
+		if (ComponentName.Contains(TEXT("Trigger"))
+			|| ComponentName.Contains(TEXT("Volume"))
+			|| ComponentName.Contains(TEXT("Placement")))
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("PlacementTarget: Auto-resolved named trigger volume target=%s trigger=%s"),
+				*GetNameSafe(this),
+				*GetNameSafe(PrimitiveComponent));
+			return PrimitiveComponent;
+		}
+	}
+
+	return nullptr;
+}
+
+bool UInteractionPlacementTargetComponent::IsUsableTriggerVolumeCandidate(const UPrimitiveComponent* CandidateComponent) const
+{
+	return CandidateComponent
+		&& CandidateComponent->GetOwner() == GetOwner()
+		&& CandidateComponent->GetGenerateOverlapEvents()
+		&& CandidateComponent->GetCollisionEnabled() != ECollisionEnabled::NoCollision;
+}
+
+void UInteractionPlacementTargetComponent::ConfigureResolvedTriggerVolume()
+{
+	if (!bAutoConfigureTriggerVolumeCollision || !ResolvedTriggerVolume)
+	{
+		return;
+	}
+
+	ResolvedTriggerVolume->SetGenerateOverlapEvents(true);
+	if (ResolvedTriggerVolume->GetCollisionEnabled() == ECollisionEnabled::NoCollision)
+	{
+		ResolvedTriggerVolume->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	}
+	ResolvedTriggerVolume->SetCollisionResponseToAllChannels(ECR_Overlap);
 }
 
 UManipulatableObjectComponent* UInteractionPlacementTargetComponent::ResolveManipulatableFromOverlap(AActor* OtherActor, UPrimitiveComponent* OtherComp) const

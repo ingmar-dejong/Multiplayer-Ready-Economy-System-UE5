@@ -9,6 +9,14 @@ UBloodProductItem::UBloodProductItem()
 	MaxStackSize = 1;
 	Weight = 0.1f;
 	BaseValue = 10;
+
+	// OwnSystem adds a generic stack quantity stat by default. Blood items use BloodQuantity
+	// instead, which is already shown in the generated description.
+	Stats.RemoveAll([](const FOwnSystemItemStat& Stat)
+	{
+		return Stat.StringVariable == TEXT("Quantity");
+	});
+
 	RefreshPresentation();
 }
 
@@ -23,6 +31,23 @@ void UBloodProductItem::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(UBloodProductItem, PackagedSourceProcessingType);
 	DOREPLIFETIME(UBloodProductItem, BloodQuantity);
 	DOREPLIFETIME(UBloodProductItem, CreatedDay);
+}
+
+void UBloodProductItem::AddedToInventory(UOwnSystemInventoryComponent* Inventory, const bool bFromLoad)
+{
+	Super::AddedToInventory(Inventory, bFromLoad);
+
+	// New runtime items should immediately rebuild their derived presentation.
+	RefreshPresentation();
+}
+
+void UBloodProductItem::PostInventoryLoaded()
+{
+	Super::PostInventoryLoaded();
+
+	// OwnSystem restores item byte data after AddedToInventory, so the loaded BloodQuantity
+	// only exists here. Rebuild the derived presentation after deserialization completes.
+	RefreshPresentation();
 }
 
 FText UBloodProductItem::GetBloodDisplayName() const
@@ -65,6 +90,16 @@ FText UBloodProductItem::GetBloodSummaryText() const
 FText UBloodProductItem::GetRawDescription_Implementation()
 {
 	return GetBloodSummaryText();
+}
+
+FString UBloodProductItem::GetStringVariable_Implementation(const FString& VariableName)
+{
+	if (VariableName == TEXT("Quantity"))
+	{
+		return FString::FromInt(BloodQuantity);
+	}
+
+	return Super::GetStringVariable_Implementation(VariableName);
 }
 
 void UBloodProductItem::RefreshPresentation()

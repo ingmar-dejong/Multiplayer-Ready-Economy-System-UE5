@@ -2,10 +2,11 @@
 
 #include "Engine/Engine.h"
 #include "Blueprint/UserWidget.h"
+#include "Components/InputComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Interaction/PlayerInteractionComponent.h"
 #include "Items/InventoryComponent.h"
-#include "UI/VampireBarrelMenu.h"
+#include "UI/ProcessingStationMenuBase.h"
 #include "Vampire/Data/BloodProcessingRecipeDataAsset.h"
 #include "Vampire/Economy/VampireEconomyComponent.h"
 #include "Vampire/Items/BloodProductItem.h"
@@ -13,6 +14,16 @@
 
 namespace
 {
+	bool CanMovePlacedStationFromInteractable(const ABloodProcessingStation* Station)
+	{
+		return Station
+			&& Station->StationState == EBloodVatStationState::Leeg
+			&& !Station->HasStagedManualProcessingRequest()
+			&& !Station->HasSpawnedManualProcessingActor()
+			&& !Station->IsMovePlacementInProgress()
+			&& Station->HasRegisteredPlacementContext();
+	}
+
 	bool DoBloodItemsMatchForStationSelection(const UBloodProductItem* A, const UBloodProductItem* B)
 	{
 		return A
@@ -80,6 +91,60 @@ namespace
 	}
 }
 
+FText UBloodProcessingInteractableComponent::GetInteractableActionText_Implementation(APawn* Interactor, UOwnSystemInteractionComponent* InteractionComp) const
+{
+	const ABloodProcessingStation* ProcessingStation = Cast<ABloodProcessingStation>(GetOwner());
+	if (ProcessingStation && ProcessingStation->IsMovePlacementInProgress())
+	{
+		return NSLOCTEXT("BloodProcessingInteractable", "StationMovingAction", "Station wordt verplaatst");
+	}
+
+	const FText DefaultActionText = Super::GetInteractableActionText_Implementation(Interactor, InteractionComp);
+	if (!CanMovePlacedStationFromInteractable(ProcessingStation))
+	{
+		return DefaultActionText;
+	}
+
+	return FText::Format(
+		NSLOCTEXT("BloodProcessingInteractable", "InteractActionWithMoveFmt", "{0} | L Verplaatsen"),
+		DefaultActionText);
+}
+
+void UBloodProcessingInteractableComponent::BeginFocus(APawn* Interactor, UOwnSystemInteractionComponent* InteractionComp)
+{
+	Super::BeginFocus(Interactor, InteractionComp);
+	ApplyMoveInteractionHotkey(Interactor);
+}
+
+void UBloodProcessingInteractableComponent::EndFocus(APawn* Interactor, UOwnSystemInteractionComponent* InteractionComp)
+{
+	RemoveMoveInteractionHotkey();
+	Super::EndFocus(Interactor, InteractionComp);
+}
+
+void UBloodProcessingInteractableComponent::SetSuppressedByMovePlacement(const bool bSuppress)
+{
+	if (bSuppress)
+	{
+		if (APawn* Interactor = FocusedInteractor.Get())
+		{
+			if (AController* Controller = Interactor->GetController())
+			{
+				if (UPlayerInteractionComponent* PlayerInteraction = Controller->GetComponentByClass<UPlayerInteractionComponent>())
+				{
+					PlayerInteraction->ClearViewedInteractable();
+				}
+			}
+		}
+
+		RemoveMoveInteractionHotkey();
+		Deactivate();
+		return;
+	}
+
+	Activate(true);
+}
+
 bool UBloodProcessingInteractableComponent::OpenStationMenuForInteractor(ABloodProcessingStation* ProcessingStation, APawn* Interactor)
 {
 	if (!ProcessingStation || !Interactor)
@@ -101,9 +166,9 @@ bool UBloodProcessingInteractableComponent::OpenStationMenuForInteractor(ABloodP
 		return false;
 	}
 
-	if (ProcessingStation->BarrelMenuClass)
+	if (TSubclassOf<UProcessingStationMenuBase> ProcessingMenuClass = ProcessingStation->GetResolvedProcessingMenuClass())
 	{
-		if (UVampireBarrelMenu* ExistingMenu = ProcessingInteractable->ActiveBarrelMenu.Get())
+		if (UProcessingStationMenuBase* ExistingMenu = ProcessingInteractable->ActiveProcessingMenu.Get())
 		{
 			SuspendProcessingInteraction(ProcessingInteractable, Interactor);
 			ExistingMenu->SetProcessingStationContext(ProcessingStation, Interactor);
@@ -127,13 +192,13 @@ bool UBloodProcessingInteractableComponent::OpenStationMenuForInteractor(ABloodP
 			return true;
 		}
 
-		if (UVampireBarrelMenu* BarrelMenu = CreateWidget<UVampireBarrelMenu>(PlayerController, ProcessingStation->BarrelMenuClass))
+		if (UProcessingStationMenuBase* ProcessingMenu = CreateWidget<UProcessingStationMenuBase>(PlayerController, ProcessingMenuClass))
 		{
 			SuspendProcessingInteraction(ProcessingInteractable, Interactor);
-			BarrelMenu->SetProcessingStationContext(ProcessingStation, Interactor);
-			BarrelMenu->AddToViewport();
-			BarrelMenu->RefreshMenu();
-			ProcessingInteractable->ActiveBarrelMenu = BarrelMenu;
+			ProcessingMenu->SetProcessingStationContext(ProcessingStation, Interactor);
+			ProcessingMenu->AddToViewport();
+			ProcessingMenu->RefreshMenu();
+			ProcessingInteractable->ActiveProcessingMenu = ProcessingMenu;
 
 			if (ProcessingStation->bUseInteractionCamera)
 			{
@@ -144,14 +209,96 @@ bool UBloodProcessingInteractableComponent::OpenStationMenuForInteractor(ABloodP
 			FInputModeGameAndUI InputMode;
 			InputMode.SetHideCursorDuringCapture(false);
 			InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
-			InputMode.SetWidgetToFocus(BarrelMenu->TakeWidget());
+			InputMode.SetWidgetToFocus(ProcessingMenu->TakeWidget());
 			PlayerController->SetInputMode(InputMode);
-			BarrelMenu->SetKeyboardFocus();
+			ProcessingMenu->SetKeyboardFocus();
 			return true;
 		}
 	}
 
 	return false;
+}
+
+void UBloodProcessingInteractableComponent::ApplyMoveInteractionHotkey(APawn* Interactor)
+{
+	ABloodProcessingStation* ProcessingStation = Cast<ABloodProcessingStation>(GetOwner());
+	if (!CanMovePlacedStationFromInteractable(ProcessingStation) || !Interactor)
+	{
+		RemoveMoveInteractionHotkey();
+		return;
+	}
+
+	APlayerController* PlayerController = Cast<APlayerController>(Interactor->GetController());
+	if (!PlayerController || !PlayerController->IsLocalController())
+	{
+		RemoveMoveInteractionHotkey();
+		return;
+	}
+
+	if (FocusedPlayerController.IsValid() && FocusedPlayerController.Get() != PlayerController)
+	{
+		RemoveMoveInteractionHotkey();
+	}
+
+	if (!FocusMoveHotkeyInputComponent)
+	{
+		FocusMoveHotkeyInputComponent = NewObject<UInputComponent>(PlayerController, TEXT("FocusedStationMoveHotkey"));
+	}
+
+	if (!FocusMoveHotkeyInputComponent)
+	{
+		return;
+	}
+
+	if (FocusedPlayerController.Get() == PlayerController)
+	{
+		PlayerController->PopInputComponent(FocusMoveHotkeyInputComponent);
+	}
+
+	FocusedInteractor = Interactor;
+	FocusedPlayerController = PlayerController;
+	FocusMoveHotkeyInputComponent->ClearActionBindings();
+	FocusMoveHotkeyInputComponent->Priority = 1002;
+	FocusMoveHotkeyInputComponent->bBlockInput = false;
+	FocusMoveHotkeyInputComponent->BindKey(EKeys::L, IE_Pressed, this, &UBloodProcessingInteractableComponent::HandleFocusedMovePressed);
+	PlayerController->PushInputComponent(FocusMoveHotkeyInputComponent);
+}
+
+void UBloodProcessingInteractableComponent::RemoveMoveInteractionHotkey()
+{
+	if (FocusMoveHotkeyInputComponent && FocusedPlayerController.IsValid())
+	{
+		FocusedPlayerController->PopInputComponent(FocusMoveHotkeyInputComponent);
+	}
+
+	FocusedInteractor.Reset();
+	FocusedPlayerController.Reset();
+}
+
+void UBloodProcessingInteractableComponent::HandleFocusedMovePressed()
+{
+	ABloodProcessingStation* ProcessingStation = Cast<ABloodProcessingStation>(GetOwner());
+	APawn* Interactor = FocusedInteractor.Get();
+	APlayerController* PlayerController = FocusedPlayerController.Get();
+	if (!CanMovePlacedStationFromInteractable(ProcessingStation) || !Interactor || !PlayerController)
+	{
+		return;
+	}
+
+	if (UPlayerInteractionComponent* PlayerInteraction = PlayerController->GetComponentByClass<UPlayerInteractionComponent>())
+	{
+		PlayerInteraction->ClearViewedInteractable();
+	}
+
+	FText Reason;
+	if (UVampireEconomyComponent* Economy = UVampireEconomyComponent::ResolveEconomyFromActor(Interactor))
+	{
+		const bool bStarted = Economy->StartMovePlacedStationMode(ProcessingStation, Reason);
+		if (!Reason.IsEmpty())
+		{
+			Economy->SetInteractionFeedback(Reason, bStarted);
+		}
+	}
 }
 
 void UBloodProcessingInteractableComponent::OnInteract_Implementation(APawn* Interactor, UOwnSystemInteractionComponent* InteractionComp)
@@ -190,7 +337,7 @@ void UBloodProcessingInteractableComponent::OnInteract_Implementation(APawn* Int
 		return;
 	}
 
-	if (ProcessingStation->BarrelMenuClass)
+	if (ProcessingStation->GetResolvedProcessingMenuClass())
 	{
 		FText OpenReason;
 		const bool bRequested = Economy->RequestOpenProcessingStationMenu(ProcessingStation, OpenReason);

@@ -195,15 +195,15 @@ namespace
 		{
 			return FText::Format(
 				Nights == 1
-					? NSLOCTEXT("VampireBarrelMenu", "ProcessingDurationNightFmt", "{0} nacht {1}:{2}")
-					: NSLOCTEXT("VampireBarrelMenu", "ProcessingDurationNightsFmt", "{0} nachten {1}:{2}"),
+					? NSLOCTEXT("ProcessingStationMenuBase", "ProcessingDurationNightFmt", "{0} nacht {1}:{2}")
+					: NSLOCTEXT("ProcessingStationMenuBase", "ProcessingDurationNightsFmt", "{0} nachten {1}:{2}"),
 				FText::AsNumber(Nights),
 				FText::AsNumber(Hours, &TwoDigitOptions),
 				FText::AsNumber(Minutes, &TwoDigitOptions));
 		}
 
 		return FText::Format(
-			NSLOCTEXT("VampireBarrelMenu", "ProcessingDurationHoursFmt", "{0}:{1}"),
+			NSLOCTEXT("ProcessingStationMenuBase", "ProcessingDurationHoursFmt", "{0}:{1}"),
 			FText::AsNumber(Hours, &TwoDigitOptions),
 			FText::AsNumber(Minutes, &TwoDigitOptions));
 	}
@@ -246,6 +246,14 @@ namespace
 		}
 	}
 
+	void SetWidgetVisibility(UWidget* Widget, const ESlateVisibility NewVisibility)
+	{
+		if (Widget)
+		{
+			Widget->SetVisibility(NewVisibility);
+		}
+	}
+
 	bool DoBloodItemsMatchForBarrel(const UBloodProductItem* A, const UBloodProductItem* B)
 	{
 		return A
@@ -285,122 +293,140 @@ namespace
 	}
 }
 
-#define LOCTEXT_NAMESPACE "VampireBarrelMenu"
+#define LOCTEXT_NAMESPACE "ProcessingStationMenuBase"
 
-UVampireBarrelMenu::UVampireBarrelMenu()
+UProcessingStationMenuBase::UProcessingStationMenuBase()
 {
 	InputConfig = EOwnSystemWidgetInputMode::GameAndMenu;
 }
 
-void UVampireBarrelMenu::SetProcessingStationContext(ABloodProcessingStation* InStation, APawn* InInteractor)
+UVampireBarrelMenu::UVampireBarrelMenu() = default;
+
+void UProcessingStationMenuBase::SetProcessingStationContext(ABloodProcessingStation* InStation, APawn* InInteractor)
 {
 	BoundStation = InStation;
 	BoundInteractor = InInteractor;
 	SelectedGroupIndex = 0;
 	SelectedAttachmentSlotIndex = 0;
 	SelectedAttachmentOptionIndex = 0;
-	SelectionMode = EVampireBarrelSelectionMode::Batches;
+	SelectionMode = EProcessingStationMenuSelectionMode::Batches;
 	bPendingCloseAfterSuccessfulHarvest = false;
 }
 
-void UVampireBarrelMenu::NativeConstruct()
+void UProcessingStationMenuBase::NativeConstruct()
 {
 	Super::NativeConstruct();
 
 	SetIsFocusable(true);
 	ResolveImportedWidgetRefs();
+
+	const UWorld* World = GetWorld();
+	if (IsDesignTime() || !World || !World->IsGameWorld())
+	{
+		return;
+	}
+
 	BoundInventory = ResolveInventory(this);
 	BoundEconomy = ResolveEconomy(this);
 
 	if (BoundInventory)
 	{
-		BoundInventory->OnInventoryUpdated.AddDynamic(this, &UVampireBarrelMenu::HandleInventoryUpdated);
-		BoundInventory->OnCurrencyChanged.AddDynamic(this, &UVampireBarrelMenu::HandleCurrencyChanged);
+		BoundInventory->OnInventoryUpdated.AddDynamic(this, &UProcessingStationMenuBase::HandleInventoryUpdated);
+		BoundInventory->OnCurrencyChanged.AddDynamic(this, &UProcessingStationMenuBase::HandleCurrencyChanged);
 	}
 
 	if (BoundEconomy)
 	{
-		BoundEconomy->OnEconomyUpdated.AddDynamic(this, &UVampireBarrelMenu::HandleEconomyUpdated);
+		BoundEconomy->OnEconomyUpdated.AddDynamic(this, &UProcessingStationMenuBase::HandleEconomyUpdated);
 	}
 
 	if (BtnPrevBatch)
 	{
-		BtnPrevBatch->OnClicked().AddUObject(this, &UVampireBarrelMenu::HandlePrevBatchClicked);
+		BtnPrevBatch->OnClicked().AddUObject(this, &UProcessingStationMenuBase::HandlePrevBatchClicked);
 	}
 
 	if (BtnNextBatch)
 	{
-		BtnNextBatch->OnClicked().AddUObject(this, &UVampireBarrelMenu::HandleNextBatchClicked);
+		BtnNextBatch->OnClicked().AddUObject(this, &UProcessingStationMenuBase::HandleNextBatchClicked);
 	}
 
 	if (BtnPrimaryAction)
 	{
-		BtnPrimaryAction->OnClicked().AddUObject(this, &UVampireBarrelMenu::HandlePrimaryActionClicked);
+		BtnPrimaryAction->OnClicked().AddUObject(this, &UProcessingStationMenuBase::HandlePrimaryActionClicked);
 	}
 
 	if (BtnClose)
 	{
-		BtnClose->OnClicked().AddUObject(this, &UVampireBarrelMenu::HandleCloseClicked);
+		BtnClose->OnClicked().AddUObject(this, &UProcessingStationMenuBase::HandleCloseClicked);
 	}
 
-	if (UWorld* World = GetWorld())
+	if (UWorld* MutableWorld = GetWorld())
 	{
-		World->GetTimerManager().SetTimer(LiveRefreshTimerHandle, this, &UVampireBarrelMenu::HandleLiveRefreshTick, 0.1f, true);
+		MutableWorld->GetTimerManager().SetTimer(LiveRefreshTimerHandle, this, &UProcessingStationMenuBase::HandleLiveRefreshTick, 0.1f, true);
 	}
 
 	RefreshMenu();
 	SetKeyboardFocus();
 }
 
-void UVampireBarrelMenu::NativeDestruct()
+void UProcessingStationMenuBase::NativeDestruct()
 {
-	if (BoundInventory)
+	const UWorld* World = GetWorld();
+	const bool bIsRuntimeWorld = World && World->IsGameWorld() && !IsDesignTime();
+
+	if (bIsRuntimeWorld && BoundInventory)
 	{
-		BoundInventory->OnInventoryUpdated.RemoveDynamic(this, &UVampireBarrelMenu::HandleInventoryUpdated);
-		BoundInventory->OnCurrencyChanged.RemoveDynamic(this, &UVampireBarrelMenu::HandleCurrencyChanged);
+		BoundInventory->OnInventoryUpdated.RemoveDynamic(this, &UProcessingStationMenuBase::HandleInventoryUpdated);
+		BoundInventory->OnCurrencyChanged.RemoveDynamic(this, &UProcessingStationMenuBase::HandleCurrencyChanged);
 	}
 
-	if (BoundEconomy)
+	if (bIsRuntimeWorld && BoundEconomy)
 	{
-		BoundEconomy->OnEconomyUpdated.RemoveDynamic(this, &UVampireBarrelMenu::HandleEconomyUpdated);
+		BoundEconomy->OnEconomyUpdated.RemoveDynamic(this, &UProcessingStationMenuBase::HandleEconomyUpdated);
 	}
 
-	if (BtnPrevBatch)
+	if (bIsRuntimeWorld && BtnPrevBatch)
 	{
 		BtnPrevBatch->OnClicked().RemoveAll(this);
 	}
 
-	if (BtnNextBatch)
+	if (bIsRuntimeWorld && BtnNextBatch)
 	{
 		BtnNextBatch->OnClicked().RemoveAll(this);
 	}
 
-	if (BtnPrimaryAction)
+	if (bIsRuntimeWorld && BtnPrimaryAction)
 	{
 		BtnPrimaryAction->OnClicked().RemoveAll(this);
 	}
 
-	UnbindFallbackButtons();
+	if (bIsRuntimeWorld)
+	{
+		UnbindFallbackButtons();
+	}
 
-	if (BtnClose)
+	if (bIsRuntimeWorld && BtnClose)
 	{
 		BtnClose->OnClicked().RemoveAll(this);
 	}
 
-	if (UWorld* World = GetWorld())
+	if (bIsRuntimeWorld)
 	{
-		World->GetTimerManager().ClearTimer(LiveRefreshTimerHandle);
+		if (UWorld* MutableWorld = GetWorld())
+		{
+			MutableWorld->GetTimerManager().ClearTimer(LiveRefreshTimerHandle);
+		}
 	}
 
 	Super::NativeDestruct();
 }
 
-FReply UVampireBarrelMenu::NativeOnPreviewKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
+FReply UProcessingStationMenuBase::NativeOnPreviewKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
 {
 	return NativeOnKeyDown(InGeometry, InKeyEvent);
 }
 
-FReply UVampireBarrelMenu::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
+FReply UProcessingStationMenuBase::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
 {
 	if (InKeyEvent.GetKey() == EKeys::Delete || InKeyEvent.GetKey() == EKeys::Escape)
 	{
@@ -444,19 +470,25 @@ FReply UVampireBarrelMenu::NativeOnKeyDown(const FGeometry& InGeometry, const FK
 	return Super::NativeOnKeyDown(InGeometry, InKeyEvent);
 }
 
-FReply UVampireBarrelMenu::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+FReply UProcessingStationMenuBase::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
 	SetKeyboardFocus();
 	return Super::NativeOnMouseButtonDown(InGeometry, InMouseEvent);
 }
 
-UWidget* UVampireBarrelMenu::NativeGetDesiredFocusTarget() const
+UWidget* UProcessingStationMenuBase::NativeGetDesiredFocusTarget() const
 {
-	return const_cast<UVampireBarrelMenu*>(this);
+	return const_cast<UProcessingStationMenuBase*>(this);
 }
 
-void UVampireBarrelMenu::RefreshMenu()
+void UProcessingStationMenuBase::RefreshMenu()
 {
+	const UWorld* World = GetWorld();
+	if (IsDesignTime() || !World || !World->IsGameWorld())
+	{
+		return;
+	}
+
 	if (ABloodProcessingStation* Station = BoundStation.Get())
 	{
 		if (ABloodPackagingStation* PackagingStation = Cast<ABloodPackagingStation>(Station))
@@ -489,7 +521,7 @@ void UVampireBarrelMenu::RefreshMenu()
 	ResolveActiveStateWidgetRefs();
 	BindFallbackButtons();
 
-	SetResolvedText(TxtTitle, TxtTitleFallback, BoundStation.IsValid() ? BoundStation->StationDisplayName : LOCTEXT("DefaultTitle", "Houten Vat"));
+	SetResolvedText(TxtTitle, TxtTitleFallback, ResolveConfiguredTitleText());
 	SetResolvedText(TxtState, TxtStateFallback, GetStateText());
 	SetResolvedText(TxtRule, TxtRuleFallback, BuildRuleText());
 
@@ -499,7 +531,7 @@ void UVampireBarrelMenu::RefreshMenu()
 		BuildRecipeSummaryText());
 	SetResolvedText(TxtStatusBannerTitle, TxtStatusBannerTitleFallback, BuildStatusBannerTitle());
 	SetResolvedText(TxtStatusBannerSubtitle, TxtStatusBannerSubtitleFallback, BuildStatusBannerSubtitle());
-	if (!BatchListContainer && !BatchListContainerFallback)
+	if (ShouldShowBatchSelection() && !BatchListContainer && !BatchListContainerFallback)
 	{
 		SetResolvedText(TxtBatchList, TxtBatchListFallback, BuildBatchListText());
 	}
@@ -507,16 +539,33 @@ void UVampireBarrelMenu::RefreshMenu()
 	{
 		SetResolvedText(TxtBatchList, TxtBatchListFallback, FText::GetEmpty());
 	}
+	const ESlateVisibility BatchSelectionVisibility = ShouldShowBatchSelection() ? ESlateVisibility::Visible : ESlateVisibility::Collapsed;
+	SetWidgetVisibility(TxtBatchList, BatchSelectionVisibility);
+	SetWidgetVisibility(TxtBatchListFallback, BatchSelectionVisibility);
+	SetWidgetVisibility(BatchListContainer, BatchSelectionVisibility);
+	SetWidgetVisibility(BatchListContainerFallback, BatchSelectionVisibility);
 	SetResolvedText(TxtDetailHeader, TxtDetailHeaderFallback, BuildDetailHeaderText());
 	SetResolvedText(TxtSelectedBatch, TxtSelectedBatchFallback, BuildSelectedBatchText());
 	SetResolvedText(TxtSelectedUnits, TxtSelectedUnitsFallback, BuildSelectedUnitsText());
 	SetResolvedText(TxtSelectedMeta, TxtSelectedMetaFallback, BuildSelectedMetaText());
 	SetResolvedText(TxtValidation, TxtValidationFallback, BuildValidationText());
-	SetResolvedText(TxtProcessFact, TxtProcessFactFallback, BuildProcessFactText());
-	SetResolvedProgressPercent(ProgressBar_Processing ? ProgressBar_Processing : ProgressBarProcessingFallback, BuildProcessingProgress01());
-	SetResolvedText(Txt_ProgressPct, TxtProgressPctFallback, BuildProcessingProgressPctText());
-	SetResolvedText(Txt_Elapsed, TxtElapsedFallback, BuildProcessingElapsedText());
-	SetResolvedText(Txt_Remaining, TxtRemainingFallback, BuildProcessingRemainingText());
+	const bool bDisplayProgress = ShouldShowProcessingProgress();
+	SetResolvedText(TxtProcessFact, TxtProcessFactFallback, bDisplayProgress ? BuildProcessFactText() : FText::GetEmpty());
+	SetResolvedProgressPercent(ProgressBar_Processing ? ProgressBar_Processing : ProgressBarProcessingFallback, bDisplayProgress ? BuildProcessingProgress01() : 0.0f);
+	SetResolvedText(Txt_ProgressPct, TxtProgressPctFallback, bDisplayProgress ? BuildProcessingProgressPctText() : FText::GetEmpty());
+	SetResolvedText(Txt_Elapsed, TxtElapsedFallback, bDisplayProgress ? BuildProcessingElapsedText() : FText::GetEmpty());
+	SetResolvedText(Txt_Remaining, TxtRemainingFallback, bDisplayProgress ? BuildProcessingRemainingText() : FText::GetEmpty());
+	const ESlateVisibility ProgressVisibility = bDisplayProgress ? ESlateVisibility::Visible : ESlateVisibility::Collapsed;
+	SetWidgetVisibility(TxtProcessFact, ProgressVisibility);
+	SetWidgetVisibility(TxtProcessFactFallback, ProgressVisibility);
+	SetWidgetVisibility(ProgressBar_Processing, ProgressVisibility);
+	SetWidgetVisibility(ProgressBarProcessingFallback, ProgressVisibility);
+	SetWidgetVisibility(Txt_ProgressPct, ProgressVisibility);
+	SetWidgetVisibility(TxtProgressPctFallback, ProgressVisibility);
+	SetWidgetVisibility(Txt_Elapsed, ProgressVisibility);
+	SetWidgetVisibility(TxtElapsedFallback, ProgressVisibility);
+	SetWidgetVisibility(Txt_Remaining, ProgressVisibility);
+	SetWidgetVisibility(TxtRemainingFallback, ProgressVisibility);
 	SetResolvedTextColor(TxtValidation, TxtValidationFallback, BuildValidationColor());
 	SetResolvedImageColor(ImgValidationDot ? ImgValidationDot : ImgValidationDotFallback, BuildValidationColor());
 	SetResolvedText(TxtFooterHelp, TxtFooterHelpFallback, BuildFooterHelpText());
@@ -533,42 +582,42 @@ void UVampireBarrelMenu::RefreshMenu()
 	}
 }
 
-void UVampireBarrelMenu::HandleInventoryUpdated()
+void UProcessingStationMenuBase::HandleInventoryUpdated()
 {
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandleCurrencyChanged(const int32 OldCurrency, const int32 NewCurrency)
+void UProcessingStationMenuBase::HandleCurrencyChanged(const int32 OldCurrency, const int32 NewCurrency)
 {
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandleEconomyUpdated()
+void UProcessingStationMenuBase::HandleEconomyUpdated()
 {
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandlePrevBatchClickedFallback()
+void UProcessingStationMenuBase::HandlePrevBatchClickedFallback()
 {
 	HandlePrevBatchClicked();
 }
 
-void UVampireBarrelMenu::HandleNextBatchClickedFallback()
+void UProcessingStationMenuBase::HandleNextBatchClickedFallback()
 {
 	HandleNextBatchClicked();
 }
 
-void UVampireBarrelMenu::HandlePrimaryActionClickedFallback()
+void UProcessingStationMenuBase::HandlePrimaryActionClickedFallback()
 {
 	HandlePrimaryActionClicked();
 }
 
-void UVampireBarrelMenu::HandleCloseClickedFallback()
+void UProcessingStationMenuBase::HandleCloseClickedFallback()
 {
 	HandleCloseClicked();
 }
 
-void UVampireBarrelMenu::HandleBatchRowClicked(const int32 ClickedIndex)
+void UProcessingStationMenuBase::HandleBatchRowClicked(const int32 ClickedIndex)
 {
 	if (ClickedIndex < 0)
 	{
@@ -579,7 +628,7 @@ void UVampireBarrelMenu::HandleBatchRowClicked(const int32 ClickedIndex)
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandleLiveRefreshTick()
+void UProcessingStationMenuBase::HandleLiveRefreshTick()
 {
 	if (bPendingCloseAfterSuccessfulHarvest || ShouldAutoRefreshBarrelMenu(BoundStation.Get()))
 	{
@@ -587,7 +636,7 @@ void UVampireBarrelMenu::HandleLiveRefreshTick()
 	}
 }
 
-void UVampireBarrelMenu::HandlePrevBatchClicked()
+void UProcessingStationMenuBase::HandlePrevBatchClicked()
 {
 	if (!BoundStation.IsValid() || BoundStation->StationState != EBloodVatStationState::Leeg)
 	{
@@ -606,7 +655,7 @@ void UVampireBarrelMenu::HandlePrevBatchClicked()
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandleNextBatchClicked()
+void UProcessingStationMenuBase::HandleNextBatchClicked()
 {
 	if (!BoundStation.IsValid() || BoundStation->StationState != EBloodVatStationState::Leeg)
 	{
@@ -625,7 +674,7 @@ void UVampireBarrelMenu::HandleNextBatchClicked()
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandlePrevRecipeClicked()
+void UProcessingStationMenuBase::HandlePrevRecipeClicked()
 {
 	if (!BoundStation.IsValid() || !BoundEconomy || BoundStation->StationState != EBloodVatStationState::Leeg || BoundStation->GetRecipeCount() <= 1)
 	{
@@ -639,7 +688,7 @@ void UVampireBarrelMenu::HandlePrevRecipeClicked()
 	}
 }
 
-void UVampireBarrelMenu::HandleNextRecipeClicked()
+void UProcessingStationMenuBase::HandleNextRecipeClicked()
 {
 	if (!BoundStation.IsValid() || !BoundEconomy || BoundStation->StationState != EBloodVatStationState::Leeg || BoundStation->GetRecipeCount() <= 1)
 	{
@@ -653,22 +702,22 @@ void UVampireBarrelMenu::HandleNextRecipeClicked()
 	}
 }
 
-void UVampireBarrelMenu::HandleToggleSelectionMode()
+void UProcessingStationMenuBase::HandleToggleSelectionMode()
 {
-	if (!BoundStation.IsValid() || BoundStation->StationState != EBloodVatStationState::Leeg || BoundStation->AttachmentSlots.IsEmpty())
+	if (!bAllowAttachmentSelection || !BoundStation.IsValid() || BoundStation->StationState != EBloodVatStationState::Leeg || BoundStation->AttachmentSlots.IsEmpty())
 	{
 		return;
 	}
 
-	SelectionMode = SelectionMode == EVampireBarrelSelectionMode::Batches
-		? EVampireBarrelSelectionMode::Attachments
-		: EVampireBarrelSelectionMode::Batches;
+	SelectionMode = SelectionMode == EProcessingStationMenuSelectionMode::Batches
+		? EProcessingStationMenuSelectionMode::Attachments
+		: EProcessingStationMenuSelectionMode::Batches;
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandlePrevAttachmentSlot()
+void UProcessingStationMenuBase::HandlePrevAttachmentSlot()
 {
-	if (!BoundStation.IsValid() || BoundStation->AttachmentSlots.IsEmpty() || BoundStation->StationState != EBloodVatStationState::Leeg)
+	if (!bAllowAttachmentSelection || !BoundStation.IsValid() || BoundStation->AttachmentSlots.IsEmpty() || BoundStation->StationState != EBloodVatStationState::Leeg)
 	{
 		return;
 	}
@@ -678,9 +727,9 @@ void UVampireBarrelMenu::HandlePrevAttachmentSlot()
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandleNextAttachmentSlot()
+void UProcessingStationMenuBase::HandleNextAttachmentSlot()
 {
-	if (!BoundStation.IsValid() || BoundStation->AttachmentSlots.IsEmpty() || BoundStation->StationState != EBloodVatStationState::Leeg)
+	if (!bAllowAttachmentSelection || !BoundStation.IsValid() || BoundStation->AttachmentSlots.IsEmpty() || BoundStation->StationState != EBloodVatStationState::Leeg)
 	{
 		return;
 	}
@@ -690,7 +739,7 @@ void UVampireBarrelMenu::HandleNextAttachmentSlot()
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandlePrevAttachmentOption()
+void UProcessingStationMenuBase::HandlePrevAttachmentOption()
 {
 	TArray<UBloodProcessingAttachmentDataAsset*> Options;
 	GetCompatibleAttachmentOptions(Options);
@@ -703,7 +752,7 @@ void UVampireBarrelMenu::HandlePrevAttachmentOption()
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandleNextAttachmentOption()
+void UProcessingStationMenuBase::HandleNextAttachmentOption()
 {
 	TArray<UBloodProcessingAttachmentDataAsset*> Options;
 	GetCompatibleAttachmentOptions(Options);
@@ -716,11 +765,15 @@ void UVampireBarrelMenu::HandleNextAttachmentOption()
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandlePrimaryActionClicked()
+void UProcessingStationMenuBase::HandlePrimaryActionClicked()
 {
 	FText Reason;
 	bool bSuccess = false;
 	const bool bWasReadyBeforeAction = BoundStation.IsValid() && BoundStation->StationState == EBloodVatStationState::Klaar;
+	const bool bWasManualPrepAction = BoundStation.IsValid()
+		&& BoundStation->StationState == EBloodVatStationState::Leeg
+		&& BoundStation->RequiresManualProcessingFlow()
+		&& !IsPackagingStation(BoundStation.Get());
 
 	if (BoundStation.IsValid())
 	{
@@ -743,7 +796,13 @@ void UVampireBarrelMenu::HandlePrimaryActionClicked()
 		BoundEconomy->SetInteractionFeedback(Reason, bSuccess);
 	}
 
-	if (bWasReadyBeforeAction && bSuccess)
+	if (bSuccess && bWasManualPrepAction && BoundStation.IsValid() && BoundStation->HasSpawnedManualProcessingActor())
+	{
+		HandleCloseClicked();
+		return;
+	}
+
+	if (bWasReadyBeforeAction && bSuccess && bAutoCloseAfterSuccessfulHarvest)
 	{
 		bPendingCloseAfterSuccessfulHarvest = true;
 	}
@@ -751,7 +810,7 @@ void UVampireBarrelMenu::HandlePrimaryActionClicked()
 	RefreshMenu();
 }
 
-void UVampireBarrelMenu::HandleCloseClicked()
+void UProcessingStationMenuBase::HandleCloseClicked()
 {
 	if (BoundStation.IsValid())
 	{
@@ -771,6 +830,14 @@ void UVampireBarrelMenu::HandleCloseClicked()
 	{
 		if (BoundStation.IsValid())
 		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("ProcessingStationMenu: Close station=%s requiresManual=%s removing=%s"),
+				*GetNameSafe(BoundStation.Get()),
+				BoundStation->RequiresManualProcessingFlow() ? TEXT("true") : TEXT("false"),
+				TEXT("FullInteractionIMC"));
+
 			BoundStation->RemoveInteractionInputContext(PlayerController);
 		}
 
@@ -787,12 +854,12 @@ void UVampireBarrelMenu::HandleCloseClicked()
 	RemoveFromParent();
 }
 
-void UVampireBarrelMenu::ResolveImportedWidgetRefs()
+void UProcessingStationMenuBase::ResolveImportedWidgetRefs()
 {
 	StateSwitcher = FindBarrelMenuWidgetByPrefix<UWidgetSwitcher>(this, TEXT("StateSwitcher"));
 }
 
-void UVampireBarrelMenu::ResolveActiveStateWidgetRefs()
+void UProcessingStationMenuBase::ResolveActiveStateWidgetRefs()
 {
 	UUserWidget* ActiveStateWidget = StateSwitcher ? Cast<UUserWidget>(StateSwitcher->GetActiveWidget()) : nullptr;
 
@@ -863,32 +930,32 @@ void UVampireBarrelMenu::ResolveActiveStateWidgetRefs()
 	BtnCloseFallback = BtnClose || !ActiveStateWidget ? nullptr : FindBarrelMenuWidgetByPrefixInUserWidget<UButton>(ActiveStateWidget, TEXT("BtnClose"));
 }
 
-void UVampireBarrelMenu::BindFallbackButtons()
+void UProcessingStationMenuBase::BindFallbackButtons()
 {
 	UnbindFallbackButtons();
 
 	if (!BtnPrevBatch && BtnPrevBatchFallback)
 	{
-		BtnPrevBatchFallback->OnClicked.AddDynamic(this, &UVampireBarrelMenu::HandlePrevBatchClickedFallback);
+		BtnPrevBatchFallback->OnClicked.AddDynamic(this, &UProcessingStationMenuBase::HandlePrevBatchClickedFallback);
 	}
 
 	if (!BtnNextBatch && BtnNextBatchFallback)
 	{
-		BtnNextBatchFallback->OnClicked.AddDynamic(this, &UVampireBarrelMenu::HandleNextBatchClickedFallback);
+		BtnNextBatchFallback->OnClicked.AddDynamic(this, &UProcessingStationMenuBase::HandleNextBatchClickedFallback);
 	}
 
 	if (!BtnPrimaryAction && BtnPrimaryActionFallback)
 	{
-		BtnPrimaryActionFallback->OnClicked.AddDynamic(this, &UVampireBarrelMenu::HandlePrimaryActionClickedFallback);
+		BtnPrimaryActionFallback->OnClicked.AddDynamic(this, &UProcessingStationMenuBase::HandlePrimaryActionClickedFallback);
 	}
 
 	if (!BtnClose && BtnCloseFallback)
 	{
-		BtnCloseFallback->OnClicked.AddDynamic(this, &UVampireBarrelMenu::HandleCloseClickedFallback);
+		BtnCloseFallback->OnClicked.AddDynamic(this, &UProcessingStationMenuBase::HandleCloseClickedFallback);
 	}
 }
 
-void UVampireBarrelMenu::UnbindFallbackButtons()
+void UProcessingStationMenuBase::UnbindFallbackButtons()
 {
 	if (BtnPrevBatchFallback)
 	{
@@ -911,7 +978,7 @@ void UVampireBarrelMenu::UnbindFallbackButtons()
 	}
 }
 
-UOwnSystemInventoryComponent* UVampireBarrelMenu::ResolveInventory(const UUserWidget* Widget)
+UOwnSystemInventoryComponent* UProcessingStationMenuBase::ResolveInventory(const UUserWidget* Widget)
 {
 	if (!Widget)
 	{
@@ -934,7 +1001,7 @@ UOwnSystemInventoryComponent* UVampireBarrelMenu::ResolveInventory(const UUserWi
 	return nullptr;
 }
 
-UVampireEconomyComponent* UVampireBarrelMenu::ResolveEconomy(const UUserWidget* Widget)
+UVampireEconomyComponent* UProcessingStationMenuBase::ResolveEconomy(const UUserWidget* Widget)
 {
 	if (!Widget)
 	{
@@ -957,7 +1024,7 @@ UVampireEconomyComponent* UVampireBarrelMenu::ResolveEconomy(const UUserWidget* 
 	return nullptr;
 }
 
-void UVampireBarrelMenu::GetCandidateGroups(TArray<UBloodProductItem*>& OutRepresentatives, TArray<int32>& OutTotalUnits) const
+void UProcessingStationMenuBase::GetCandidateGroups(TArray<UBloodProductItem*>& OutRepresentatives, TArray<int32>& OutTotalUnits) const
 {
 	OutRepresentatives.Reset();
 	OutTotalUnits.Reset();
@@ -997,7 +1064,7 @@ void UVampireBarrelMenu::GetCandidateGroups(TArray<UBloodProductItem*>& OutRepre
 	}
 }
 
-void UVampireBarrelMenu::ClampSelectedGroupIndex()
+void UProcessingStationMenuBase::ClampSelectedGroupIndex()
 {
 	TArray<UBloodProductItem*> Representatives;
 	TArray<int32> TotalUnits;
@@ -1012,13 +1079,13 @@ void UVampireBarrelMenu::ClampSelectedGroupIndex()
 	SelectedGroupIndex = FMath::Clamp(SelectedGroupIndex, 0, Representatives.Num() - 1);
 }
 
-void UVampireBarrelMenu::ClampSelectedAttachmentState()
+void UProcessingStationMenuBase::ClampSelectedAttachmentState()
 {
-	if (!BoundStation.IsValid() || BoundStation->AttachmentSlots.IsEmpty())
+	if (!bAllowAttachmentSelection || !BoundStation.IsValid() || BoundStation->AttachmentSlots.IsEmpty())
 	{
 		SelectedAttachmentSlotIndex = 0;
 		SelectedAttachmentOptionIndex = 0;
-		SelectionMode = EVampireBarrelSelectionMode::Batches;
+		SelectionMode = EProcessingStationMenuSelectionMode::Batches;
 		return;
 	}
 
@@ -1035,7 +1102,7 @@ void UVampireBarrelMenu::ClampSelectedAttachmentState()
 	SelectedAttachmentOptionIndex = FMath::Clamp(SelectedAttachmentOptionIndex, 0, Options.Num() - 1);
 }
 
-int32 UVampireBarrelMenu::GetSelectedGroupUnits() const
+int32 UProcessingStationMenuBase::GetSelectedGroupUnits() const
 {
 	TArray<UBloodProductItem*> Representatives;
 	TArray<int32> TotalUnits;
@@ -1049,7 +1116,7 @@ int32 UVampireBarrelMenu::GetSelectedGroupUnits() const
 	return TotalUnits.IsValidIndex(SafeIndex) ? TotalUnits[SafeIndex] : 0;
 }
 
-UBloodProductItem* UVampireBarrelMenu::GetSelectedRepresentative() const
+UBloodProductItem* UProcessingStationMenuBase::GetSelectedRepresentative() const
 {
 	TArray<UBloodProductItem*> Representatives;
 	TArray<int32> TotalUnits;
@@ -1063,11 +1130,11 @@ UBloodProductItem* UVampireBarrelMenu::GetSelectedRepresentative() const
 	return Representatives[SafeIndex];
 }
 
-void UVampireBarrelMenu::GetCompatibleAttachmentOptions(TArray<UBloodProcessingAttachmentDataAsset*>& OutOptions) const
+void UProcessingStationMenuBase::GetCompatibleAttachmentOptions(TArray<UBloodProcessingAttachmentDataAsset*>& OutOptions) const
 {
 	OutOptions.Reset();
 
-	if (!BoundStation.IsValid() || !BoundStation->AttachmentSlots.IsValidIndex(SelectedAttachmentSlotIndex))
+	if (!bAllowAttachmentSelection || !BoundStation.IsValid() || !BoundStation->AttachmentSlots.IsValidIndex(SelectedAttachmentSlotIndex))
 	{
 		return;
 	}
@@ -1089,21 +1156,48 @@ void UVampireBarrelMenu::GetCompatibleAttachmentOptions(TArray<UBloodProcessingA
 	}
 }
 
-const FProcessingStationAttachmentSlot* UVampireBarrelMenu::GetSelectedAttachmentSlot() const
+const FProcessingStationAttachmentSlot* UProcessingStationMenuBase::GetSelectedAttachmentSlot() const
 {
 	return BoundStation.IsValid() && BoundStation->AttachmentSlots.IsValidIndex(SelectedAttachmentSlotIndex)
 		? &BoundStation->AttachmentSlots[SelectedAttachmentSlotIndex]
 		: nullptr;
 }
 
-UBloodProcessingAttachmentDataAsset* UVampireBarrelMenu::GetSelectedAttachmentOption() const
+UBloodProcessingAttachmentDataAsset* UProcessingStationMenuBase::GetSelectedAttachmentOption() const
 {
 	TArray<UBloodProcessingAttachmentDataAsset*> Options;
 	GetCompatibleAttachmentOptions(Options);
 	return Options.IsValidIndex(SelectedAttachmentOptionIndex) ? Options[SelectedAttachmentOptionIndex] : nullptr;
 }
 
-FText UVampireBarrelMenu::GetStateText() const
+FText UProcessingStationMenuBase::ResolveOverrideText(const FText& OverrideText, const FText& DefaultText) const
+{
+	return OverrideText.IsEmpty() ? DefaultText : OverrideText;
+}
+
+FText UProcessingStationMenuBase::ResolveConfiguredTitleText() const
+{
+	if (!MenuTitleOverride.IsEmpty())
+	{
+		return MenuTitleOverride;
+	}
+
+	return BoundStation.IsValid()
+		? BoundStation->StationDisplayName
+		: LOCTEXT("DefaultTitle", "Processing Station");
+}
+
+bool UProcessingStationMenuBase::ShouldShowBatchSelection() const
+{
+	return bShowBatchSelection;
+}
+
+bool UProcessingStationMenuBase::ShouldShowProcessingProgress() const
+{
+	return bShowProcessingProgress;
+}
+
+FText UProcessingStationMenuBase::GetStateText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1123,7 +1217,7 @@ FText UVampireBarrelMenu::GetStateText() const
 	}
 }
 
-FText UVampireBarrelMenu::GetPrimaryActionText() const
+FText UProcessingStationMenuBase::GetPrimaryActionText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1150,27 +1244,29 @@ FText UVampireBarrelMenu::GetPrimaryActionText() const
 					: LOCTEXT("ActionPackagingRespawn", "Zet item opnieuw klaar");
 			}
 
-			return LOCTEXT("ActionPackagingPrepare", "Zet item klaar op tafel");
+			return ResolveOverrideText(IdlePrimaryActionTextOverride, LOCTEXT("ActionPackagingPrepare", "Zet item klaar op tafel"));
 		}
 
 		if (BoundStation->HasStagedManualProcessingRequest())
 		{
-			return BoundStation->HasSpawnedManualProcessingActor()
-				? LOCTEXT("ActionAwaitPlacement", "Plaats jug in vat")
-				: LOCTEXT("ActionRespawnJug", "Zet jug opnieuw klaar");
+			return ResolveOverrideText(
+				IdlePrimaryActionTextOverride,
+				BoundStation->HasSpawnedManualProcessingActor()
+					? LOCTEXT("ActionAwaitPlacement", "Plaats item op station")
+					: LOCTEXT("ActionRespawnJug", "Zet item opnieuw klaar"));
 		}
 
-		return LOCTEXT("ActionPreparePlacement", "Zet batch klaar op tafel");
+		return ResolveOverrideText(IdlePrimaryActionTextOverride, LOCTEXT("ActionPreparePlacement", "Zet batch klaar op tafel"));
 	case EBloodVatStationState::Rijpt:
 		return LOCTEXT("ActionOccupied", "Station bezet");
 	case EBloodVatStationState::Klaar:
-		return LOCTEXT("ActionHarvest", "Neem batch");
+		return ResolveOverrideText(ReadyPrimaryActionTextOverride, LOCTEXT("ActionHarvest", "Neem batch"));
 	default:
 		return LOCTEXT("ActionUnknown", "Actie");
 	}
 }
 
-FText UVampireBarrelMenu::BuildRuleText() const
+FText UProcessingStationMenuBase::BuildRuleText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1197,7 +1293,7 @@ FText UVampireBarrelMenu::BuildRuleText() const
 		FText::AsNumber(MinimumUnits));
 }
 
-FText UVampireBarrelMenu::BuildRecipeSummaryText() const
+FText UProcessingStationMenuBase::BuildRecipeSummaryText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1219,7 +1315,7 @@ FText UVampireBarrelMenu::BuildRecipeSummaryText() const
 		RecipeName);
 }
 
-FText UVampireBarrelMenu::BuildStatusBannerTitle() const
+FText UProcessingStationMenuBase::BuildStatusBannerTitle() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1239,24 +1335,24 @@ FText UVampireBarrelMenu::BuildStatusBannerTitle() const
 				}
 			}
 
-			return BoundStation->HasStagedManualProcessingRequest()
-				? LOCTEXT("BannerPackagingPreparedTitle", "Packaging-item klaar")
-				: LOCTEXT("BannerPackagingIdleTitle", "Packaging klaar");
-		}
+				return BoundStation->HasStagedManualProcessingRequest()
+					? ResolveOverrideText(PreparedBannerTitleOverride, LOCTEXT("BannerPackagingPreparedTitle", "Packaging-item klaar"))
+					: ResolveOverrideText(EmptyBannerTitleOverride, LOCTEXT("BannerPackagingIdleTitle", "Packaging klaar"));
+			}
 
-		return BoundStation->HasStagedManualProcessingRequest()
-			? LOCTEXT("BannerJugReadyTitle", "Jug staat klaar")
-			: LOCTEXT("BannerEmptyTitle", "Station gereed");
-	case EBloodVatStationState::Rijpt:
-		return LOCTEXT("BannerAgingTitle", "Verwerking actief");
-	case EBloodVatStationState::Klaar:
-		return LOCTEXT("BannerReadyTitle", "Verwerking voltooid");
+			return BoundStation->HasStagedManualProcessingRequest()
+				? ResolveOverrideText(PreparedBannerTitleOverride, LOCTEXT("BannerJugReadyTitle", "Item staat klaar"))
+				: ResolveOverrideText(EmptyBannerTitleOverride, LOCTEXT("BannerEmptyTitle", "Station gereed"));
+		case EBloodVatStationState::Rijpt:
+			return ResolveOverrideText(BusyBannerTitleOverride, LOCTEXT("BannerAgingTitle", "Verwerking actief"));
+		case EBloodVatStationState::Klaar:
+			return ResolveOverrideText(ReadyBannerTitleOverride, LOCTEXT("BannerReadyTitle", "Verwerking voltooid"));
 	default:
 		return FText::GetEmpty();
 	}
 }
 
-FText UVampireBarrelMenu::BuildStatusBannerSubtitle() const
+FText UProcessingStationMenuBase::BuildStatusBannerSubtitle() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1282,32 +1378,40 @@ FText UVampireBarrelMenu::BuildStatusBannerSubtitle() const
 						ProgressText);
 				}
 
-				return BoundStation->HasStagedManualProcessingRequest()
-					? (BoundStation->HasSpawnedManualProcessingActor()
-						? FText::Format(LOCTEXT("BannerPackagingPreparedSubtitle", "{0} Er ligt nu 1 packaging-item op tafel."), ProgressText)
-						: FText::Format(LOCTEXT("BannerPackagingRespawnSubtitle", "{0} Er ligt geen actief item op tafel. Zet opnieuw 1 item klaar."), ProgressText))
-					: FText::Format(LOCTEXT("BannerPackagingIdleSubtitle", "{0} Kies een geldige batch en zet daarna 1 packaging-item op tafel."), ProgressText);
+					return BoundStation->HasStagedManualProcessingRequest()
+						? ResolveOverrideText(
+							PreparedBannerSubtitleOverride,
+							BoundStation->HasSpawnedManualProcessingActor()
+								? FText::Format(LOCTEXT("BannerPackagingPreparedSubtitle", "{0} Er ligt nu 1 packaging-item op tafel."), ProgressText)
+								: FText::Format(LOCTEXT("BannerPackagingRespawnSubtitle", "{0} Er ligt geen actief item op tafel. Zet opnieuw 1 item klaar."), ProgressText))
+						: ResolveOverrideText(
+							EmptyBannerSubtitleOverride,
+							FText::Format(LOCTEXT("BannerPackagingIdleSubtitle", "{0} Kies een geldige batch en zet daarna 1 packaging-item op tafel."), ProgressText));
+				}
 			}
-		}
 
-		return BoundStation->HasStagedManualProcessingRequest()
-			? LOCTEXT("BannerJugReadySubtitle", "De geselecteerde batch staat als gevulde jug op tafel. Plaats die nu fysiek in het vat.")
-			: LOCTEXT("BannerEmptySubtitle", "Kies een geldige batch en zet die daarna als jug klaar op tafel.");
-	case EBloodVatStationState::Rijpt:
-		return FText::Format(
-			LOCTEXT("BannerAgingSubtitle", "{0} units worden verwerkt. Klaar op dag {1}."),
-			FText::AsNumber(BoundStation->StoredBatch.BloodQuantity),
-			FText::AsNumber(BoundStation->ProcessingReadyDay));
-	case EBloodVatStationState::Klaar:
-		return FText::Format(
-			LOCTEXT("BannerReadySubtitle", "{0} units verwerkt bloed wachten op ophalen."),
-			FText::AsNumber(BoundStation->StoredBatch.BloodQuantity));
+			return BoundStation->HasStagedManualProcessingRequest()
+				? ResolveOverrideText(PreparedBannerSubtitleOverride, LOCTEXT("BannerJugReadySubtitle", "De geselecteerde batch staat klaar als handmatig world-item. Plaats die nu fysiek op de stationtarget."))
+				: ResolveOverrideText(EmptyBannerSubtitleOverride, LOCTEXT("BannerEmptySubtitle", "Kies een geldige batch en zet die daarna klaar voor de stationflow."));
+		case EBloodVatStationState::Rijpt:
+			return ResolveOverrideText(
+				BusyBannerSubtitleOverride,
+				FText::Format(
+					LOCTEXT("BannerAgingSubtitle", "{0} units worden verwerkt. Klaar op dag {1}."),
+					FText::AsNumber(BoundStation->StoredBatch.BloodQuantity),
+					FText::AsNumber(BoundStation->ProcessingReadyDay)));
+		case EBloodVatStationState::Klaar:
+			return ResolveOverrideText(
+				ReadyBannerSubtitleOverride,
+				FText::Format(
+					LOCTEXT("BannerReadySubtitle", "{0} units verwerkt bloed wachten op ophalen."),
+					FText::AsNumber(BoundStation->StoredBatch.BloodQuantity)));
 	default:
 		return FText::GetEmpty();
 	}
 }
 
-FText UVampireBarrelMenu::BuildBatchListText() const
+FText UProcessingStationMenuBase::BuildBatchListText() const
 {
 	if (BoundStation.IsValid() && BoundStation->StationState != EBloodVatStationState::Leeg)
 	{
@@ -1353,7 +1457,7 @@ FText UVampireBarrelMenu::BuildBatchListText() const
 	return FText::FromString(Result);
 }
 
-bool UVampireBarrelMenu::HandleCancelPackaging(FText& OutReason)
+bool UProcessingStationMenuBase::HandleCancelPackaging(FText& OutReason)
 {
 	if (!BoundStation.IsValid() || !BoundEconomy)
 	{
@@ -1368,10 +1472,10 @@ bool UVampireBarrelMenu::HandleCancelPackaging(FText& OutReason)
 		return false;
 	}
 
-	return BoundEconomy->RequestCancelReservedPackaging(PackagingStation, OutReason);
+	return BoundEconomy->RequestCancelManualProcessing(PackagingStation, OutReason);
 }
 
-FText UVampireBarrelMenu::BuildBatchRowNameText(const UBloodProductItem* BloodItem) const
+FText UProcessingStationMenuBase::BuildBatchRowNameText(const UBloodProductItem* BloodItem) const
 {
 	if (!BloodItem)
 	{
@@ -1384,7 +1488,7 @@ FText UVampireBarrelMenu::BuildBatchRowNameText(const UBloodProductItem* BloodIt
 		UBloodProductItem::GetProcessingDisplayName(BloodItem->ProcessingType));
 }
 
-FText UVampireBarrelMenu::BuildBatchRowMetaText(const UBloodProductItem* BloodItem) const
+FText UProcessingStationMenuBase::BuildBatchRowMetaText(const UBloodProductItem* BloodItem) const
 {
 	if (!BoundStation.IsValid() || !BloodItem)
 	{
@@ -1403,14 +1507,14 @@ FText UVampireBarrelMenu::BuildBatchRowMetaText(const UBloodProductItem* BloodIt
 		NightUnitText);
 }
 
-FText UVampireBarrelMenu::BuildBatchRowTagText(const bool bIsValid) const
+FText UProcessingStationMenuBase::BuildBatchRowTagText(const bool bIsValid) const
 {
 	return bIsValid
 		? LOCTEXT("BatchRowTagValid", "GELDIG")
 		: LOCTEXT("BatchRowTagInvalid", "ONGELDIG");
 }
 
-FText UVampireBarrelMenu::BuildDetailHeaderText() const
+FText UProcessingStationMenuBase::BuildDetailHeaderText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1426,7 +1530,7 @@ FText UVampireBarrelMenu::BuildDetailHeaderText() const
 			: LOCTEXT("DetailHeaderSelected", "Geselecteerde batch");
 }
 
-FText UVampireBarrelMenu::BuildSelectedBatchText() const
+FText UProcessingStationMenuBase::BuildSelectedBatchText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1466,7 +1570,7 @@ FText UVampireBarrelMenu::BuildSelectedBatchText() const
 	return LOCTEXT("NoSelectedBatch", "Nog geen batch geselecteerd.");
 }
 
-FText UVampireBarrelMenu::BuildValidationText() const
+FText UProcessingStationMenuBase::BuildValidationText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1534,7 +1638,7 @@ FText UVampireBarrelMenu::BuildValidationText() const
 		: Reason;
 }
 
-FText UVampireBarrelMenu::BuildProcessFactText() const
+FText UProcessingStationMenuBase::BuildProcessFactText() const
 {
 	if (!BoundStation.IsValid() || BoundStation->StationState != EBloodVatStationState::Rijpt)
 	{
@@ -1550,7 +1654,7 @@ FText UVampireBarrelMenu::BuildProcessFactText() const
 	return LOCTEXT("DefaultProcessFact", "Deze verwerking verandert de batch in een waardevoller product.");
 }
 
-float UVampireBarrelMenu::BuildProcessingProgress01() const
+float UProcessingStationMenuBase::BuildProcessingProgress01() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1570,7 +1674,7 @@ float UVampireBarrelMenu::BuildProcessingProgress01() const
 	return BoundStation->GetProcessingProgress01(GetOwnSystemAccumulatedTime(this));
 }
 
-FText UVampireBarrelMenu::BuildProcessingProgressPctText() const
+FText UProcessingStationMenuBase::BuildProcessingProgressPctText() const
 {
 	if (!BoundStation.IsValid() || BoundStation->StationState != EBloodVatStationState::Rijpt)
 	{
@@ -1582,7 +1686,7 @@ FText UVampireBarrelMenu::BuildProcessingProgressPctText() const
 		FText::AsNumber(FMath::RoundToInt(BuildProcessingProgress01() * 100.0f)));
 }
 
-FText UVampireBarrelMenu::BuildProcessingElapsedText() const
+FText UProcessingStationMenuBase::BuildProcessingElapsedText() const
 {
 	if (!BoundStation.IsValid() || BoundStation->StationState != EBloodVatStationState::Rijpt)
 	{
@@ -1594,7 +1698,7 @@ FText UVampireBarrelMenu::BuildProcessingElapsedText() const
 		FormatProcessingDurationText(BoundStation->GetProcessingElapsedTimeUnits(GetOwnSystemAccumulatedTime(this))));
 }
 
-FText UVampireBarrelMenu::BuildProcessingRemainingText() const
+FText UProcessingStationMenuBase::BuildProcessingRemainingText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1616,7 +1720,7 @@ FText UVampireBarrelMenu::BuildProcessingRemainingText() const
 		FormatProcessingDurationText(BoundStation->GetProcessingRemainingTimeUnits(GetOwnSystemAccumulatedTime(this))));
 }
 
-FText UVampireBarrelMenu::BuildSelectedUnitsText() const
+FText UProcessingStationMenuBase::BuildSelectedUnitsText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1653,7 +1757,7 @@ FText UVampireBarrelMenu::BuildSelectedUnitsText() const
 	return FText::GetEmpty();
 }
 
-FText UVampireBarrelMenu::BuildSelectedMetaText() const
+FText UProcessingStationMenuBase::BuildSelectedMetaText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1718,7 +1822,7 @@ FText UVampireBarrelMenu::BuildSelectedMetaText() const
 		NightUnitText);
 }
 
-FSlateColor UVampireBarrelMenu::BuildValidationColor() const
+FSlateColor UProcessingStationMenuBase::BuildValidationColor() const
 {
 	const FLinearColor SuccessColor(0.24f, 0.52f, 0.20f, 1.0f);
 	const FLinearColor FailureColor(0.55f, 0.14f, 0.10f, 0.85f);
@@ -1754,7 +1858,7 @@ FSlateColor UVampireBarrelMenu::BuildValidationColor() const
 	return FSlateColor(bValid ? SuccessColor : FailureColor);
 }
 
-FText UVampireBarrelMenu::BuildFooterHelpText() const
+FText UProcessingStationMenuBase::BuildFooterHelpText() const
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1774,35 +1878,39 @@ FText UVampireBarrelMenu::BuildFooterHelpText() const
 				}
 			}
 
-				return BoundStation->HasStagedManualProcessingRequest()
-					? (BoundStation->HasSpawnedManualProcessingActor()
-						? LOCTEXT("FooterHelpPackagingPrepared", "Er ligt nu 1 item op tafel. Plaats dit in een vrij doos-slot om de teller te verhogen. Druk C om deze packaging-run te annuleren.")
-						: LOCTEXT("FooterHelpPackagingRespawn", "Het actieve packaging-item ontbreekt. Zet opnieuw 1 item klaar op tafel, of druk C om de gereserveerde batch te annuleren."))
-					: LOCTEXT("FooterHelpPackagingEmpty", "Gebruik W/S of Q/E om een batch te kiezen. Zet daarna 1 packaging-item klaar op tafel.");
-		}
+					return BoundStation->HasStagedManualProcessingRequest()
+						? ResolveOverrideText(
+							PreparedFooterHelpOverride,
+							BoundStation->HasSpawnedManualProcessingActor()
+								? LOCTEXT("FooterHelpPackagingPrepared", "Er ligt nu 1 item op tafel. Plaats dit in een vrij doos-slot om de teller te verhogen. Druk C om deze packaging-run te annuleren.")
+								: LOCTEXT("FooterHelpPackagingRespawn", "Het actieve packaging-item ontbreekt. Zet opnieuw 1 item klaar op tafel, of druk C om de gereserveerde batch te annuleren."))
+						: ResolveOverrideText(
+							EmptyFooterHelpOverride,
+							LOCTEXT("FooterHelpPackagingEmpty", "Gebruik W/S of Q/E om een batch te kiezen. Zet daarna 1 packaging-item klaar op tafel."));
+			}
 
 		if (BoundStation->HasStagedManualProcessingRequest())
 		{
 			return BoundStation->HasSpawnedManualProcessingActor()
-				? LOCTEXT("FooterHelpAwaitPlacement", "Pak de gevulde jug van tafel en plaats die in het vat om de rijping echt te starten.")
-				: LOCTEXT("FooterHelpRespawnPlacement", "De voorbereiding staat nog klaar, maar de jug ontbreekt. Zet de jug opnieuw op tafel.");
+				? ResolveOverrideText(PreparedFooterHelpOverride, LOCTEXT("FooterHelpAwaitPlacement", "Pak het voorbereide station-item van tafel en plaats het op de stationtarget om de verwerking echt te starten."))
+				: ResolveOverrideText(PreparedFooterHelpOverride, LOCTEXT("FooterHelpRespawnPlacement", "De voorbereiding staat nog klaar, maar het actieve item ontbreekt. Zet het item opnieuw op tafel."));
 		}
 
-		return LOCTEXT("FooterHelpEmpty", "Gebruik W/S of Q/E om batches te wisselen. Zet daarna de gekozen batch als jug klaar op tafel.");
+		return ResolveOverrideText(EmptyFooterHelpOverride, LOCTEXT("FooterHelpEmpty", "Gebruik W/S of Q/E om batches te wisselen. Zet daarna de gekozen batch klaar voor de stationflow."));
 	case EBloodVatStationState::Rijpt:
-		return LOCTEXT("FooterHelpAging", "Het station is bezet. Kom later terug om de verwerking te controleren.");
-	case EBloodVatStationState::Klaar:
-		return LOCTEXT("FooterHelpReady", "Gebruik de primaire knop om de verwerkte batch terug te nemen.");
+			return ResolveOverrideText(BusyFooterHelpOverride, LOCTEXT("FooterHelpAging", "Het station is bezet. Kom later terug om de verwerking te controleren."));
+		case EBloodVatStationState::Klaar:
+			return ResolveOverrideText(ReadyFooterHelpOverride, LOCTEXT("FooterHelpReady", "Gebruik de primaire knop om de verwerkte batch terug te nemen."));
 	default:
 		return FText::GetEmpty();
 	}
 }
 
-bool UVampireBarrelMenu::HandleStartAging(FText& OutReason)
+bool UProcessingStationMenuBase::HandleStartAging(FText& OutReason)
 {
 	if (!BoundStation.IsValid() || !BoundInventory || !BoundEconomy)
 	{
-		OutReason = LOCTEXT("NoBarrelContext", "Houten vat context ontbreekt.");
+		OutReason = LOCTEXT("NoBarrelContext", "Processing station context ontbreekt.");
 		return false;
 	}
 
@@ -1850,7 +1958,7 @@ bool UVampireBarrelMenu::HandleStartAging(FText& OutReason)
 	return BoundEconomy && BoundEconomy->RequestPrepareManualProcessing(BoundStation.Get(), SelectedItem, GetSelectedGroupUnits(), false, OutReason);
 }
 
-bool UVampireBarrelMenu::HandleHarvest(FText& OutReason)
+bool UProcessingStationMenuBase::HandleHarvest(FText& OutReason)
 {
 	if (!BoundStation.IsValid() || !BoundInventory || !BoundEconomy)
 	{
@@ -1861,7 +1969,7 @@ bool UVampireBarrelMenu::HandleHarvest(FText& OutReason)
 	return BoundEconomy->RequestHarvestProcessedBatch(BoundStation.Get(), OutReason);
 }
 
-bool UVampireBarrelMenu::HandleAttachmentAction(FText& OutReason)
+bool UProcessingStationMenuBase::HandleAttachmentAction(FText& OutReason)
 {
 	if (!BoundStation.IsValid())
 	{
@@ -1886,7 +1994,7 @@ bool UVampireBarrelMenu::HandleAttachmentAction(FText& OutReason)
 	return false;
 }
 
-void UVampireBarrelMenu::RebuildBatchRowList()
+void UProcessingStationMenuBase::RebuildBatchRowList()
 {
 	UScrollBox* ActiveBatchListContainer = BatchListContainer ? BatchListContainer.Get() : BatchListContainerFallback.Get();
 	if (!ActiveBatchListContainer)
@@ -1952,13 +2060,13 @@ void UVampireBarrelMenu::RebuildBatchRowList()
 			BuildBatchRowTagText(bIsValid),
 			bIsValid,
 			Index == SelectedGroupIndex);
-		RowWidget->OnBatchRowClicked.AddDynamic(this, &UVampireBarrelMenu::HandleBatchRowClicked);
+		RowWidget->OnBatchRowClicked.AddDynamic(this, &UProcessingStationMenuBase::HandleBatchRowClicked);
 	}
 }
 
-void UVampireBarrelMenu::UpdateButtonState()
+void UProcessingStationMenuBase::UpdateButtonState()
 {
-	const ESlateVisibility BatchNavVisibility = BoundStation.IsValid() && BoundStation->StationState == EBloodVatStationState::Leeg
+	const ESlateVisibility BatchNavVisibility = ShouldShowBatchSelection() && BoundStation.IsValid() && BoundStation->StationState == EBloodVatStationState::Leeg
 		? ESlateVisibility::Visible
 		: ESlateVisibility::Collapsed;
 

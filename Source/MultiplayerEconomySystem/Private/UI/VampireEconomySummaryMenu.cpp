@@ -3,6 +3,7 @@
 #include "Blueprint/WidgetTree.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "EngineUtils.h"
 #include "UnrealFramework/OwnSystemGameState.h"
 #include "Items/InventoryComponent.h"
 #include "Items/OwnSystemItem.h"
@@ -10,10 +11,11 @@
 #include "InputCoreTypes.h"
 #include "Math/UnrealMathUtility.h"
 #include "Vampire/Data/BloodBuyerDataAsset.h"
-#include "Vampire/Data/BloodProcessingRecipeDataAsset.h"
 #include "Vampire/Economy/VampireEconomyComponent.h"
 #include "Vampire/Items/BloodProductItem.h"
+#include "Vampire/Items/PlaceableStationItem.h"
 #include "Vampire/World/BloodBuyerNPC.h"
+#include "Vampire/World/WorkspaceRoom.h"
 #include "Widgets/OwnSystemCommonButtonBase.h"
 #include "Widgets/OwnSystemCommonTextBlock.h"
 
@@ -79,15 +81,6 @@ UVampireEconomySummaryMenu::UVampireEconomySummaryMenu()
 	InputConfig = EOwnSystemWidgetInputMode::GameAndMenu;
 }
 
-void UVampireEconomySummaryMenu::SetProcessingStationContext(ABloodProcessingStation* InStation, APawn* InInteractor)
-{
-	(void)InStation;
-	(void)InInteractor;
-	BoundBuyer.Reset();
-	BoundBuyerInteractor.Reset();
-	SelectedBloodItemIndex = 0;
-}
-
 void UVampireEconomySummaryMenu::SetBuyerContext(ABloodBuyerNPC* InBuyer, APawn* InInteractor)
 {
 	BoundBuyer = InBuyer;
@@ -133,16 +126,6 @@ void UVampireEconomySummaryMenu::NativeConstruct()
 	if (BtnProcessSelected)
 	{
 		BtnProcessSelected->OnClicked().AddUObject(this, &UVampireEconomySummaryMenu::HandleProcessSelectedClicked);
-	}
-
-	if (BtnPrevProcessingMode)
-	{
-		BtnPrevProcessingMode->OnClicked().AddUObject(this, &UVampireEconomySummaryMenu::HandlePrevProcessingModeClicked);
-	}
-
-	if (BtnNextProcessingMode)
-	{
-		BtnNextProcessingMode->OnClicked().AddUObject(this, &UVampireEconomySummaryMenu::HandleNextProcessingModeClicked);
 	}
 
 	if (BtnPrevThrall)
@@ -201,16 +184,6 @@ void UVampireEconomySummaryMenu::NativeDestruct()
 		BtnProcessSelected->OnClicked().RemoveAll(this);
 	}
 
-	if (BtnPrevProcessingMode)
-	{
-		BtnPrevProcessingMode->OnClicked().RemoveAll(this);
-	}
-
-	if (BtnNextProcessingMode)
-	{
-		BtnNextProcessingMode->OnClicked().RemoveAll(this);
-	}
-
 	if (BtnPrevThrall)
 	{
 		BtnPrevThrall->OnClicked().RemoveAll(this);
@@ -241,6 +214,14 @@ UWidget* UVampireEconomySummaryMenu::NativeGetDesiredFocusTarget() const
 
 FReply UVampireEconomySummaryMenu::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
 {
+	if (!IsInBuyerContext() && InKeyEvent.GetKey() == EKeys::P)
+	{
+		if (HandleDebugPlaceFirstStation())
+		{
+			return FReply::Handled();
+		}
+	}
+
 	if (IsInBuyerContext())
 	{
 		if (InKeyEvent.GetKey() == EKeys::Q || InKeyEvent.GetKey() == EKeys::Left)
@@ -254,18 +235,6 @@ FReply UVampireEconomySummaryMenu::NativeOnKeyDown(const FGeometry& InGeometry, 
 			HandleNextBloodItemClicked();
 			return FReply::Handled();
 		}
-	}
-
-	if (InKeyEvent.GetKey() == EKeys::Q || InKeyEvent.GetKey() == EKeys::Left)
-	{
-		HandlePrevProcessingModeClicked();
-		return FReply::Handled();
-	}
-
-	if (InKeyEvent.GetKey() == EKeys::E || InKeyEvent.GetKey() == EKeys::Right)
-	{
-		HandleNextProcessingModeClicked();
-		return FReply::Handled();
 	}
 
 	return Super::NativeOnKeyDown(InGeometry, InKeyEvent);
@@ -301,11 +270,6 @@ void UVampireEconomySummaryMenu::RefreshSummary()
 		TxtSelectedThrall->SetText(BuildSelectedThrallText());
 	}
 
-	if (TxtSelectedProcessingMode)
-	{
-		TxtSelectedProcessingMode->SetText(BuildSelectedProcessingModeText());
-	}
-
 	UpdateButtonStateForCurrentContext();
 }
 
@@ -339,12 +303,11 @@ FText UVampireEconomySummaryMenu::BuildSummaryText() const
 	const FText LastFeedback = Economy ? Economy->GetLastFeedbackMessage() : LOCTEXT("NoFeedback", "Nog geen acties uitgevoerd.");
 
 	return FText::Format(
-		LOCTEXT("EconomySummaryFmt", "Blood Economy\n\nGoud: {0}\nBlood items: {1}\nActieve thralls: {2}\nDagelijkse upkeep: {3} bloed\nProcessing mode: {4}\n\nLaatste actie:\n{5}"),
+		LOCTEXT("EconomySummaryFmt", "Blood Economy\n\nGoud: {0}\nBlood items: {1}\nActieve thralls: {2}\nDagelijkse upkeep: {3} bloed\n\nLaatste actie:\n{4}"),
 		FText::AsNumber(Currency),
 		FText::AsNumber(BloodItemCount),
 		FText::AsNumber(ActiveThralls),
 		FText::AsNumber(DailyUpkeep),
-		GetProcessingModeDisplayName(GetSelectedProcessingMode()),
 		LastFeedback);
 }
 
@@ -520,12 +483,10 @@ FText UVampireEconomySummaryMenu::BuildSelectedBloodItemText() const
 	}
 
 	return FText::Format(
-		LOCTEXT("SelectedBloodItemFmt", "Selected blood item\n\nIndex: {0}/{1}\n{2}\n\nGekozen processing:\n{3}\n{4}\n\nToetsen: Q/E of links/rechts wisselt processing mode."),
+		LOCTEXT("SelectedBloodItemFmt", "Selected blood item\n\nIndex: {0}/{1}\n{2}"),
 		FText::AsNumber(SafeIndex + 1),
 		FText::AsNumber(BloodItems.Num()),
-		SelectedItem->GetBloodSummaryText(),
-		GetProcessingModeDisplayName(GetSelectedProcessingMode()),
-		GetProcessingModeDescription(GetSelectedProcessingMode()));
+		SelectedItem->GetBloodSummaryText());
 }
 
 FText UVampireEconomySummaryMenu::BuildSelectedThrallText() const
@@ -565,20 +526,6 @@ FText UVampireEconomySummaryMenu::BuildSelectedThrallText() const
 		SelectedThrall->RequiredBloodUnitsPerDay,
 		*QualityText,
 		SelectedThrall->bActive ? TEXT("Actief") : TEXT("Inactief")));
-}
-
-FText UVampireEconomySummaryMenu::BuildSelectedProcessingModeText() const
-{
-	if (IsInBuyerContext())
-	{
-		return LOCTEXT("BuyerHelpPane", "Buyerbediening\n\nSelecteer een verkoopgroep en gebruik de primaire knop om de volledige compatibele groep te verkopen.");
-	}
-
-	const EVampireProcessingMode Mode = GetSelectedProcessingMode();
-	return FText::Format(
-		LOCTEXT("SelectedProcessingModeFmt", "Processing mode\n\n{0}\n{1}\n\nGebruik Q/E of links/rechts om te wisselen."),
-		GetProcessingModeDisplayName(Mode),
-		GetProcessingModeDescription(Mode));
 }
 
 UOwnSystemInventoryComponent* UVampireEconomySummaryMenu::ResolveInventory(const UUserWidget* Widget)
@@ -815,17 +762,9 @@ void UVampireEconomySummaryMenu::UpdateButtonStateForCurrentContext()
 
 		if (BtnProcessSelected)
 		{
+			BtnProcessSelected->SetIsEnabled(true);
+			BtnProcessSelected->SetVisibility(ESlateVisibility::Visible);
 			BtnProcessSelected->SetButtonText(GetBuyerPrimaryActionText());
-		}
-
-		if (BtnPrevProcessingMode)
-		{
-			BtnPrevProcessingMode->SetVisibility(ESlateVisibility::Collapsed);
-		}
-
-		if (BtnNextProcessingMode)
-		{
-			BtnNextProcessingMode->SetVisibility(ESlateVisibility::Collapsed);
 		}
 
 		if (BtnPrevThrall)
@@ -869,18 +808,9 @@ void UVampireEconomySummaryMenu::UpdateButtonStateForCurrentContext()
 
 	if (BtnProcessSelected)
 	{
+		BtnProcessSelected->SetIsEnabled(true);
 		BtnProcessSelected->SetVisibility(ESlateVisibility::Visible);
-		BtnProcessSelected->SetButtonText(LOCTEXT("EconomyProcessItemBtn", "Verwerk item"));
-	}
-
-	if (BtnPrevProcessingMode)
-	{
-		BtnPrevProcessingMode->SetVisibility(ESlateVisibility::Visible);
-	}
-
-	if (BtnNextProcessingMode)
-	{
-		BtnNextProcessingMode->SetVisibility(ESlateVisibility::Visible);
+		BtnProcessSelected->SetButtonText(LOCTEXT("EconomyDebugPlaceBtn", "Debug plaats station"));
 	}
 
 	if (BtnPrevThrall)
@@ -973,80 +903,62 @@ bool UVampireEconomySummaryMenu::HandleBuyerSellAction()
 	return SoldItemCount > 0;
 }
 
-EVampireProcessingMode UVampireEconomySummaryMenu::GetSelectedProcessingMode() const
+bool UVampireEconomySummaryMenu::HandleDebugPlaceFirstStation()
 {
-	const int32 SafeIndex = FMath::Clamp(SelectedProcessingModeIndex, 0, 2);
-	return static_cast<EVampireProcessingMode>(SafeIndex);
-}
+	if (!BoundEconomy)
+	{
+		RefreshSummary();
+		return false;
+	}
 
-void UVampireEconomySummaryMenu::StepSelectedProcessingMode(const int32 Direction)
-{
-	constexpr int32 ModeCount = 3;
-	SelectedProcessingModeIndex = (SelectedProcessingModeIndex + Direction + ModeCount) % ModeCount;
+	UPlaceableStationItem* StationItem = GetFirstPlaceableStationItem();
+	if (!StationItem)
+	{
+		BoundEconomy->SetInteractionFeedback(LOCTEXT("DebugPlaceNoStationItem", "Debug place: geen placeable station-item in inventory gevonden."), false);
+		RefreshSummary();
+		return true;
+	}
+
+	FText Reason;
+	const bool bSuccess = BoundEconomy->RequestAutoPlaceStationItem(StationItem, Reason);
+	BoundEconomy->SetInteractionFeedback(Reason, bSuccess);
 	RefreshSummary();
+	return true;
 }
 
-FText UVampireEconomySummaryMenu::GetProcessingModeDisplayName(const EVampireProcessingMode Mode) const
+UPlaceableStationItem* UVampireEconomySummaryMenu::GetFirstPlaceableStationItem() const
 {
-	switch (Mode)
+	const UOwnSystemInventoryComponent* Inventory = ResolveInventory(this);
+	if (!Inventory)
 	{
-	case EVampireProcessingMode::Snel:
-		return LOCTEXT("ProcessingModeFast", "Snel");
-	case EVampireProcessingMode::Voorzichtig:
-		return LOCTEXT("ProcessingModeCareful", "Voorzichtig");
-	case EVampireProcessingMode::Luxe:
-		return LOCTEXT("ProcessingModeLuxury", "Luxe");
-	default:
-		return LOCTEXT("ProcessingModeUnknown", "Onbekend");
+		return nullptr;
 	}
+
+	for (UOwnSystemItem* Item : Inventory->GetItems())
+	{
+		if (UPlaceableStationItem* StationItem = Cast<UPlaceableStationItem>(Item))
+		{
+			return StationItem;
+		}
+	}
+
+	return nullptr;
 }
 
-FText UVampireEconomySummaryMenu::GetProcessingModeDescription(const EVampireProcessingMode Mode) const
+AWorkspaceRoom* UVampireEconomySummaryMenu::FindFirstWorkspaceRoom() const
 {
-	switch (Mode)
+	if (const UWorld* World = GetWorld())
 	{
-	case EVampireProcessingMode::Snel:
-		return LOCTEXT("ProcessingModeFastDesc", "Goedkoop en direct. Lage instap, vooral bedoeld om vers bloed snel om te zetten.");
-	case EVampireProcessingMode::Voorzichtig:
-		return LOCTEXT("ProcessingModeCarefulDesc", "Rustige middenweg. Kleine goudkost, maar stabieler als standaardroute.");
-	case EVampireProcessingMode::Luxe:
-		return LOCTEXT("ProcessingModeLuxuryDesc", "Duurdere, selectieve route. Vraagt minstens goede inputkwaliteit.");
-	default:
-		return FText::GetEmpty();
-	}
-}
-
-bool UVampireEconomySummaryMenu::CreateTemporaryRecipeForSelectedMode(UBloodProcessingRecipeDataAsset*& OutRecipe) const
-{
-	OutRecipe = NewObject<UBloodProcessingRecipeDataAsset>(const_cast<UVampireEconomySummaryMenu*>(this));
-	if (!OutRecipe)
-	{
-		return false;
+		for (TActorIterator<AWorkspaceRoom> It(World); It; ++It)
+		{
+			if (AWorkspaceRoom* WorkspaceRoom = *It)
+			{
+				return WorkspaceRoom;
+			}
+		}
 	}
 
-	OutRecipe->RequiredInputProcessing = EBloodProcessingType::Vers;
-	OutRecipe->OutputProcessing = EBloodProcessingType::GerijptOpHout;
-
-	switch (GetSelectedProcessingMode())
-	{
-	case EVampireProcessingMode::Snel:
-		OutRecipe->RecipeName = LOCTEXT("RecipeFast", "Houten Vatkamer - Snel");
-		OutRecipe->MinimumQuality = EBloodQuality::Gewoon;
-		OutRecipe->GoldCost = 0;
-		return true;
-	case EVampireProcessingMode::Voorzichtig:
-		OutRecipe->RecipeName = LOCTEXT("RecipeCareful", "Houten Vatkamer - Voorzichtig");
-		OutRecipe->MinimumQuality = EBloodQuality::Gewoon;
-		OutRecipe->GoldCost = 1;
-		return true;
-	case EVampireProcessingMode::Luxe:
-		OutRecipe->RecipeName = LOCTEXT("RecipeLuxury", "Houten Vatkamer - Luxe");
-		OutRecipe->MinimumQuality = EBloodQuality::Goed;
-		OutRecipe->GoldCost = 3;
-		return true;
-	default:
-		return false;
-	}
+	return nullptr;
 }
 
 int32 UVampireEconomySummaryMenu::GetThrallCount() const
@@ -1181,16 +1093,6 @@ void UVampireEconomySummaryMenu::HandleNextBloodItemClicked()
 	RefreshSummary();
 }
 
-void UVampireEconomySummaryMenu::HandlePrevProcessingModeClicked()
-{
-	StepSelectedProcessingMode(-1);
-}
-
-void UVampireEconomySummaryMenu::HandleNextProcessingModeClicked()
-{
-	StepSelectedProcessingMode(1);
-}
-
 void UVampireEconomySummaryMenu::HandleProcessSelectedClicked()
 {
 	if (IsInBuyerContext())
@@ -1200,25 +1102,8 @@ void UVampireEconomySummaryMenu::HandleProcessSelectedClicked()
 		return;
 	}
 
-	if (!BoundEconomy)
-	{
-		return;
-	}
-
-	UBloodProductItem* SelectedItem = GetSelectedBloodItem();
-	if (!SelectedItem)
-	{
-		return;
-	}
-
-	UBloodProcessingRecipeDataAsset* TemporaryRecipe = nullptr;
-	if (!CreateTemporaryRecipeForSelectedMode(TemporaryRecipe))
-	{
-		return;
-	}
-
-	FText Reason;
-	BoundEconomy->ProcessBloodItem(SelectedItem, TemporaryRecipe, Reason);
+	HandleDebugPlaceFirstStation();
+	RefreshSummary();
 }
 
 void UVampireEconomySummaryMenu::HandlePrevThrallClicked()

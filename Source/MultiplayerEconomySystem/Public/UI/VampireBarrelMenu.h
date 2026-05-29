@@ -22,19 +22,19 @@ class UWidgetSwitcher;
 class UVampireBloodBatchRowWidget;
 class UVampireEconomyComponent;
 
-enum class EVampireBarrelSelectionMode : uint8
+enum class EProcessingStationMenuSelectionMode : uint8
 {
 	Batches,
 	Attachments
 };
 
 UCLASS(Blueprintable)
-class VAMPIREEMPIRE_API UVampireBarrelMenu : public UOwnSystemMenu
+class VAMPIREEMPIRE_API UProcessingStationMenuBase : public UOwnSystemMenu
 {
 	GENERATED_BODY()
 
 public:
-	UVampireBarrelMenu();
+	UProcessingStationMenuBase();
 
 	UFUNCTION(BlueprintCallable, Category = "Vampire|UI")
 	void SetProcessingStationContext(ABloodProcessingStation* InStation, APawn* InInteractor);
@@ -125,6 +125,63 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI")
 	TSubclassOf<UVampireBloodBatchRowWidget> BatchRowClass;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText MenuTitleOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText IdlePrimaryActionTextOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText ReadyPrimaryActionTextOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText EmptyBannerTitleOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText PreparedBannerTitleOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText BusyBannerTitleOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText ReadyBannerTitleOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText EmptyBannerSubtitleOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText PreparedBannerSubtitleOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText BusyBannerSubtitleOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText ReadyBannerSubtitleOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText EmptyFooterHelpOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText PreparedFooterHelpOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText BusyFooterHelpOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	FText ReadyFooterHelpOverride;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	bool bShowBatchSelection = true;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	bool bShowProcessingProgress = true;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	bool bAllowAttachmentSelection = true;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Vampire|UI|Config")
+	bool bAutoCloseAfterSuccessfulHarvest = true;
+
 private:
 	UFUNCTION()
 	void HandleInventoryUpdated();
@@ -198,6 +255,10 @@ private:
 	FText BuildProcessingRemainingText() const;
 	FSlateColor BuildValidationColor() const;
 	FText BuildFooterHelpText() const;
+	FText ResolveOverrideText(const FText& OverrideText, const FText& DefaultText) const;
+	FText ResolveConfiguredTitleText() const;
+	bool ShouldShowBatchSelection() const;
+	bool ShouldShowProcessingProgress() const;
 	bool HandleStartAging(FText& OutReason);
 	bool HandleHarvest(FText& OutReason);
 	bool HandleAttachmentAction(FText& OutReason);
@@ -301,7 +362,7 @@ private:
 	UPROPERTY(Transient)
 	int32 SelectedGroupIndex = 0;
 
-	EVampireBarrelSelectionMode SelectionMode = EVampireBarrelSelectionMode::Batches;
+	EProcessingStationMenuSelectionMode SelectionMode = EProcessingStationMenuSelectionMode::Batches;
 
 	int32 SelectedAttachmentSlotIndex = 0;
 
@@ -310,4 +371,13 @@ private:
 	bool bPendingCloseAfterSuccessfulHarvest = false;
 
 	FTimerHandle LiveRefreshTimerHandle;
+};
+
+UCLASS(Blueprintable)
+class VAMPIREEMPIRE_API UVampireBarrelMenu : public UProcessingStationMenuBase
+{
+	GENERATED_BODY()
+
+public:
+	UVampireBarrelMenu();
 };

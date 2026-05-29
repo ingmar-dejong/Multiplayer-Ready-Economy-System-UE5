@@ -7,11 +7,17 @@
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/LocalPlayer.h"
+#include "Engine/StaticMesh.h"
+#include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Items/InventoryComponent.h"
+#include "Misc/SecureHash.h"
 #include "Net/UnrealNetwork.h"
+#include "Containers/StringConv.h"
+#include "UObject/UObjectIterator.h"
 #include "UnrealFramework/OwnSystemGameState.h"
+#include "Vampire/Data/PlaceableStationDataAsset.h"
 #include "Vampire/Data/BloodProcessingAttachmentDataAsset.h"
 #include "Vampire/Data/BloodProcessingRecipeDataAsset.h"
 #include "Vampire/Economy/VampireEconomyComponent.h"
@@ -19,13 +25,14 @@
 #include "Vampire/Interaction/InteractionPlacementTargetComponent.h"
 #include "Vampire/Interaction/ManipulatableObjectComponent.h"
 #include "Vampire/Items/BloodProductItem.h"
-#include "Vampire/World/BloodPackagingStation.h"
+#include "Vampire/World/StationPlacementPreviewActor.h"
+#include "Vampire/World/WorkspaceRoom.h"
 
 #define LOCTEXT_NAMESPACE "BloodProcessingStation"
 
 namespace
 {
-	constexpr float TimeUnitsPerDay = 2400.0f;
+	constexpr float StationTimeUnitsPerDay = 2400.0f;
 
 	bool HasAllRequiredTags(const FGameplayTagContainer& OwnedTags, const FGameplayTagContainer& RequiredTags)
 	{
@@ -125,6 +132,26 @@ namespace
 		}
 
 		return 0.0f;
+	}
+
+	FGuid BuildDeterministicGuidFromString(const FString& Source)
+	{
+		FMD5 Md5;
+		FTCHARToUTF8 Utf8(*Source);
+		Md5.Update(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+
+		uint8 Digest[16];
+		Md5.Final(Digest);
+
+		uint32 A = 0;
+		uint32 B = 0;
+		uint32 C = 0;
+		uint32 D = 0;
+		FMemory::Memcpy(&A, Digest + 0, sizeof(uint32));
+		FMemory::Memcpy(&B, Digest + 4, sizeof(uint32));
+		FMemory::Memcpy(&C, Digest + 8, sizeof(uint32));
+		FMemory::Memcpy(&D, Digest + 12, sizeof(uint32));
+		return FGuid(A, B, C, D);
 	}
 
 	bool IsOperatorContextStale(const APawn* OperatorPawn)
@@ -238,6 +265,61 @@ namespace
 		return RemainingUnits <= 0;
 	}
 
+	void LogInteractionInputAudit(
+		const TCHAR* Phase,
+		const ABloodProcessingStation* Station,
+		APlayerController* PlayerController,
+		const UInputMappingContext* MappingContext)
+	{
+		const FString StationName = GetNameSafe(Station);
+		const FString PlayerControllerName = GetNameSafe(PlayerController);
+		const FString MappingContextName = GetNameSafe(MappingContext);
+		const bool bShowMouseCursor = PlayerController ? PlayerController->ShouldShowMouseCursor() : false;
+
+		if (!PlayerController)
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("BloodProcessingStation: InputAudit phase=%s station=%s pc=None imc=%s"),
+				Phase,
+				*StationName,
+				*MappingContextName);
+			return;
+		}
+
+		if (ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer())
+		{
+			if (UEnhancedInputLocalPlayerSubsystem* InputSubsystem = LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
+			{
+				int32 FoundPriority = INDEX_NONE;
+				const bool bHasMappingContext = MappingContext && InputSubsystem->HasMappingContext(MappingContext, FoundPriority);
+				UE_LOG(
+					LogTemp,
+					Warning,
+					TEXT("BloodProcessingStation: InputAudit phase=%s station=%s pc=%s imc=%s hasIMC=%s priority=%d showMouseCursor=%s"),
+					Phase,
+					*StationName,
+					*PlayerControllerName,
+					*MappingContextName,
+					bHasMappingContext ? TEXT("true") : TEXT("false"),
+					FoundPriority,
+					bShowMouseCursor ? TEXT("true") : TEXT("false"));
+				return;
+			}
+		}
+
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("BloodProcessingStation: InputAudit phase=%s station=%s pc=%s imc=%s subsystem=None showMouseCursor=%s"),
+			Phase,
+			*StationName,
+			*PlayerControllerName,
+			*MappingContextName,
+			bShowMouseCursor ? TEXT("true") : TEXT("false"));
+	}
+
 	int32 GetTotalMatchingUnitsForRequest(const UOwnSystemInventoryComponent* Inventory, const FBloodProcessingStartRequest& Request)
 	{
 		if (!Inventory || !Request.ItemClass)
@@ -260,7 +342,7 @@ namespace
 		return TotalUnits;
 	}
 
-	bool ConsumeMatchingUnitsForRequest(UOwnSystemInventoryComponent* Inventory, const FBloodProcessingStartRequest& Request)
+bool ConsumeMatchingUnitsForRequest(UOwnSystemInventoryComponent* Inventory, const FBloodProcessingStartRequest& Request)
 	{
 		if (!Inventory || !Request.ItemClass || Request.BloodQuantity <= 0)
 		{
@@ -300,6 +382,13 @@ namespace
 	}
 }
 
+TMap<TWeakObjectPtr<ULocalPlayer>, TMap<TObjectPtr<UInputMappingContext>, int32>> ABloodProcessingStation::SharedInteractionMappingContextRefs;
+
+TSubclassOf<UProcessingStationMenuBase> ABloodProcessingStation::GetResolvedProcessingMenuClass() const
+{
+	return ProcessingMenuClass ? ProcessingMenuClass : BarrelMenuClass;
+}
+
 ABloodProcessingStation::ABloodProcessingStation()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -320,6 +409,126 @@ ABloodProcessingStation::ABloodProcessingStation()
 	StationDisplayName = LOCTEXT("DefaultStationName", "Houten Vat");
 }
 
+void ABloodProcessingStation::PrepareForSave_Implementation()
+{
+	if (!IsNetStartupActor() && !SavedActorGuid.IsValid())
+	{
+		SavedActorGuid = FGuid::NewGuid();
+	}
+
+	if (HasAuthority() && PlacedStationInstanceId.IsValid())
+	{
+		FText PlacementReason;
+		EnsurePlacementRecordForCurrentTransform(PlacementReason);
+	}
+}
+
+void ABloodProcessingStation::Load_Implementation()
+{
+	RefreshAttachmentVisuals();
+	RefreshPlacementTransformFromReplicatedState();
+
+	if (HasAuthority() && PlacedStationInstanceId.IsValid())
+	{
+		FText PlacementReason;
+		if (!EnsurePlacementRecordForCurrentTransform(PlacementReason))
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("BloodProcessingStation: Failed to restore placement record after load for station=%s reason=%s"),
+				*GetNameSafe(this),
+				*PlacementReason.ToString());
+		}
+	}
+
+	const EBloodVatStationState PreviousState = StationState;
+	const int32 SharedSimDay = FMath::Max(0, FMath::FloorToInt(GetStationOwnSystemAccumulatedTime(this) / StationTimeUnitsPerDay));
+	UpdateReadyState(SharedSimDay);
+	if (StationState != PreviousState)
+	{
+		ForceNetUpdate();
+	}
+}
+
+bool ABloodProcessingStation::ShouldRespawn_Implementation() const
+{
+	return !IsNetStartupActor();
+}
+
+void ABloodProcessingStation::SetActorGUID_Implementation(const FGuid& SavedGUID)
+{
+	if (SavedGUID.IsValid())
+	{
+		SavedActorGuid = SavedGUID;
+	}
+}
+
+FGuid ABloodProcessingStation::GetActorGUID_Implementation() const
+{
+	if (PlacedStationInstanceId.IsValid())
+	{
+		return PlacedStationInstanceId;
+	}
+
+	if (SavedActorGuid.IsValid())
+	{
+		return SavedActorGuid;
+	}
+
+	if (IsNetStartupActor())
+	{
+		return BuildDeterministicGuidFromString(GetPathName());
+	}
+
+	return FGuid();
+}
+
+bool ABloodProcessingStation::AddBloodItemFromRequestToInventory(
+	UOwnSystemInventoryComponent* Inventory,
+	const FBloodProcessingStartRequest& Request,
+	const EBloodProcessingType ResultProcessingType,
+	const bool bMarkAsPackaged,
+	const EBloodProcessingType SourceProcessingType,
+	UBloodProductItem*& OutInventoryItem,
+	FText& OutReason) const
+{
+	OutInventoryItem = nullptr;
+	OutReason = FText::GetEmpty();
+
+	if (!Inventory || !Request.ItemClass)
+	{
+		OutReason = LOCTEXT("ManualRestoreMissingInventory", "Inventory of batchdata ontbreekt voor deze actie.");
+		return false;
+	}
+
+	const FItemAddResult AddResult = Inventory->TryAddItemFromClass(Request.ItemClass, 1, false);
+	if (AddResult.AmountGiven <= 0 || AddResult.Stacks.IsEmpty())
+	{
+		OutReason = LOCTEXT("ManualRestoreAddFailed", "Het blood item kon niet aan de inventory worden toegevoegd.");
+		return false;
+	}
+
+	UBloodProductItem* InventoryItem = Cast<UBloodProductItem>(AddResult.Stacks[0]);
+	if (!InventoryItem)
+	{
+		OutReason = LOCTEXT("ManualRestoreWrongItemClass", "De inventory output heeft een ongeldige item class.");
+		return false;
+	}
+
+	InventoryItem->SourceType = Request.SourceType;
+	InventoryItem->BaseQuality = Request.BaseQuality;
+	InventoryItem->ProcessingType = ResultProcessingType;
+	InventoryItem->bHasPackagedSourceProcessing = bMarkAsPackaged;
+	InventoryItem->PackagedSourceProcessingType = bMarkAsPackaged ? SourceProcessingType : EBloodProcessingType::Vers;
+	InventoryItem->BloodQuantity = Request.BloodQuantity;
+	InventoryItem->CreatedDay = Request.CreatedDay;
+	InventoryItem->RefreshPresentation();
+
+	OutInventoryItem = InventoryItem;
+	return true;
+}
+
 void ABloodProcessingStation::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
@@ -337,6 +546,12 @@ void ABloodProcessingStation::GetLifetimeReplicatedProps(TArray<FLifetimePropert
 	DOREPLIFETIME(ABloodProcessingStation, StagedManualStartRequest);
 	DOREPLIFETIME(ABloodProcessingStation, SpawnedManualPreviewActor);
 	DOREPLIFETIME(ABloodProcessingStation, CurrentOperator);
+	DOREPLIFETIME(ABloodProcessingStation, bMovePlacementInProgress);
+	DOREPLIFETIME(ABloodProcessingStation, MovePreviewState);
+	DOREPLIFETIME(ABloodProcessingStation, PlacedStationInstanceId);
+	DOREPLIFETIME(ABloodProcessingStation, OwningRoomId);
+	DOREPLIFETIME(ABloodProcessingStation, GridAnchorCell);
+	DOREPLIFETIME(ABloodProcessingStation, RotationQuarterTurns);
 }
 
 bool ABloodProcessingStation::RequiresManualProcessingFlow() const
@@ -354,6 +569,22 @@ void ABloodProcessingStation::BeginPlay()
 {
 	Super::BeginPlay();
 	RefreshAttachmentVisuals();
+	BootstrapEditorPlacedStationPlacement();
+	RefreshPlacementTransformFromReplicatedState();
+
+	if (RequiresManualProcessingFlow())
+	{
+		FText ManualPreviewValidationReason;
+		if (!ValidateManualPreviewSetup(ManualPreviewValidationReason))
+		{
+			UE_LOG(
+				LogTemp,
+				Warning,
+				TEXT("BloodProcessingStation: Manual preview setup invalid for station=%s reason=%s"),
+				*GetNameSafe(this),
+				*ManualPreviewValidationReason.ToString());
+		}
+	}
 
 	ResolvedManualPlacementTarget = ResolveManualPlacementTarget();
 	if (ResolvedManualPlacementTarget)
@@ -365,6 +596,8 @@ void ABloodProcessingStation::BeginPlay()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("BloodProcessingStation: No manual placement target resolved for station=%s"), *GetNameSafe(this));
 	}
+
+	OnRep_MovePlacementState();
 }
 
 void ABloodProcessingStation::Tick(float DeltaSeconds)
@@ -389,7 +622,7 @@ void ABloodProcessingStation::Tick(float DeltaSeconds)
 	}
 
 	const EBloodVatStationState PreviousState = StationState;
-	const int32 SharedSimDay = FMath::Max(0, FMath::FloorToInt(GetStationOwnSystemAccumulatedTime(this) / TimeUnitsPerDay));
+	const int32 SharedSimDay = FMath::Max(0, FMath::FloorToInt(GetStationOwnSystemAccumulatedTime(this) / StationTimeUnitsPerDay));
 	UpdateReadyState(SharedSimDay);
 	if (StationState != PreviousState)
 	{
@@ -619,6 +852,7 @@ void ABloodProcessingStation::ApplyInteractionInputContext(APlayerController* Pl
 	const FString StationName = GetName();
 	const FString PlayerControllerName = PlayerController ? PlayerController->GetName() : TEXT("None");
 	const FString MappingContextName = InteractionInputMappingContext ? InteractionInputMappingContext.Get()->GetName() : TEXT("None");
+	LogInteractionInputAudit(TEXT("BeforeApplyInteractionIMC"), this, PlayerController, InteractionInputMappingContext);
 
 	if (!PlayerController || !InteractionInputMappingContext)
 	{
@@ -636,14 +870,31 @@ void ABloodProcessingStation::ApplyInteractionInputContext(APlayerController* Pl
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* InputSubsystem = LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
 		{
-			InputSubsystem->AddMappingContext(InteractionInputMappingContext, InteractionInputMappingPriority);
-			UE_LOG(
-				LogTemp,
-				Warning,
-				TEXT("BloodProcessingStation: Added interaction IMC %s to %s at priority %d"),
-				*MappingContextName,
-				*PlayerControllerName,
-				InteractionInputMappingPriority);
+			TMap<TObjectPtr<UInputMappingContext>, int32>& MappingRefs = SharedInteractionMappingContextRefs.FindOrAdd(LocalPlayer);
+			int32& RefCount = MappingRefs.FindOrAdd(InteractionInputMappingContext);
+			if (RefCount == 0)
+			{
+				InputSubsystem->AddMappingContext(InteractionInputMappingContext, InteractionInputMappingPriority);
+				UE_LOG(
+					LogTemp,
+					Warning,
+					TEXT("BloodProcessingStation: Added interaction IMC %s to %s at priority %d"),
+					*MappingContextName,
+					*PlayerControllerName,
+					InteractionInputMappingPriority);
+			}
+			else
+			{
+				UE_LOG(
+					LogTemp,
+					Warning,
+					TEXT("BloodProcessingStation: Reused interaction IMC %s for %s (refcount now %d)"),
+					*MappingContextName,
+					*PlayerControllerName,
+					RefCount + 1);
+			}
+
+			++RefCount;
 		}
 		else
 		{
@@ -654,6 +905,8 @@ void ABloodProcessingStation::ApplyInteractionInputContext(APlayerController* Pl
 	{
 		UE_LOG(LogTemp, Warning, TEXT("BloodProcessingStation: No LocalPlayer found while adding IMC for %s"), *GetNameSafe(this));
 	}
+
+	LogInteractionInputAudit(TEXT("AfterApplyInteractionIMC"), this, PlayerController, InteractionInputMappingContext);
 
 	if (InteractionHotkeyPlayerController && InteractionHotkeyPlayerController != PlayerController)
 	{
@@ -688,6 +941,7 @@ void ABloodProcessingStation::RemoveInteractionInputContext(APlayerController* P
 	const FString StationName = GetName();
 	const FString PlayerControllerName = PlayerController ? PlayerController->GetName() : TEXT("None");
 	const FString MappingContextName = InteractionInputMappingContext ? InteractionInputMappingContext.Get()->GetName() : TEXT("None");
+	LogInteractionInputAudit(TEXT("BeforeRemoveInteractionIMC"), this, PlayerController, InteractionInputMappingContext);
 
 	if (!PlayerController || !InteractionInputMappingContext)
 	{
@@ -705,13 +959,39 @@ void ABloodProcessingStation::RemoveInteractionInputContext(APlayerController* P
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* InputSubsystem = LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
 		{
-			InputSubsystem->RemoveMappingContext(InteractionInputMappingContext);
-			UE_LOG(
-				LogTemp,
-				Warning,
-				TEXT("BloodProcessingStation: Removed interaction IMC %s from %s"),
-				*MappingContextName,
-				*PlayerControllerName);
+			if (TMap<TObjectPtr<UInputMappingContext>, int32>* MappingRefs = SharedInteractionMappingContextRefs.Find(LocalPlayer))
+			{
+				if (int32* RefCount = MappingRefs->Find(InteractionInputMappingContext))
+				{
+					*RefCount = FMath::Max(0, *RefCount - 1);
+					if (*RefCount == 0)
+					{
+						InputSubsystem->RemoveMappingContext(InteractionInputMappingContext);
+						MappingRefs->Remove(InteractionInputMappingContext);
+						if (MappingRefs->IsEmpty())
+						{
+							SharedInteractionMappingContextRefs.Remove(LocalPlayer);
+						}
+
+						UE_LOG(
+							LogTemp,
+							Warning,
+							TEXT("BloodProcessingStation: Removed interaction IMC %s from %s"),
+							*MappingContextName,
+							*PlayerControllerName);
+					}
+					else
+					{
+						UE_LOG(
+							LogTemp,
+							Warning,
+							TEXT("BloodProcessingStation: Kept interaction IMC %s for %s (refcount now %d)"),
+							*MappingContextName,
+							*PlayerControllerName,
+							*RefCount);
+					}
+				}
+			}
 		}
 		else
 		{
@@ -723,7 +1003,14 @@ void ABloodProcessingStation::RemoveInteractionInputContext(APlayerController* P
 		UE_LOG(LogTemp, Warning, TEXT("BloodProcessingStation: No LocalPlayer found while removing IMC for %s"), *GetNameSafe(this));
 	}
 
-	if (InteractionHotkeyInputComponent && InteractionHotkeyPlayerController == PlayerController)
+	LogInteractionInputAudit(TEXT("AfterRemoveInteractionIMC"), this, PlayerController, InteractionInputMappingContext);
+
+	RemoveInteractionHotkeys(PlayerController);
+}
+
+void ABloodProcessingStation::RemoveInteractionHotkeys(APlayerController* PlayerController)
+{
+	if (InteractionHotkeyInputComponent && InteractionHotkeyPlayerController == PlayerController && PlayerController)
 	{
 		PlayerController->PopInputComponent(InteractionHotkeyInputComponent);
 		InteractionHotkeyPlayerController = nullptr;
@@ -747,6 +1034,12 @@ bool ABloodProcessingStation::TryClaimOperator(APawn* InInteractor, FText& OutRe
 	if (!InInteractor)
 	{
 		OutReason = LOCTEXT("ClaimOperatorMissingInteractor", "Geen geldige speler gevonden voor dit station.");
+		return false;
+	}
+
+	if (bMovePlacementInProgress && CurrentOperator != InInteractor)
+	{
+		OutReason = LOCTEXT("ClaimOperatorMoveBusy", "Dit station wordt momenteel door een andere speler verplaatst.");
 		return false;
 	}
 
@@ -795,11 +1088,298 @@ bool ABloodProcessingStation::IsCurrentOperator(const APawn* InInteractor) const
 	return InInteractor && CurrentOperator == InInteractor;
 }
 
+bool ABloodProcessingStation::TryBeginMovePlacement(APawn* InInteractor, FText& OutReason)
+{
+	OutReason = FText::GetEmpty();
+
+	if (!TryClaimOperator(InInteractor, OutReason))
+	{
+		return false;
+	}
+
+	bMovePlacementInProgress = true;
+	MovePreviewState = FProcessingStationMovePreviewState();
+	MovePreviewState.bActive = true;
+	OnRep_MovePlacementState();
+	OnRep_MovePreviewState();
+	ForceNetUpdate();
+	return true;
+}
+
+void ABloodProcessingStation::EndMovePlacement(APawn* InInteractor)
+{
+	if (!bMovePlacementInProgress)
+	{
+		return;
+	}
+
+	if (InInteractor && CurrentOperator && CurrentOperator != InInteractor)
+	{
+		return;
+	}
+
+	bMovePlacementInProgress = false;
+	MovePreviewState = FProcessingStationMovePreviewState();
+	OnRep_MovePlacementState();
+	OnRep_MovePreviewState();
+	ReleaseOperator(InInteractor);
+	ForceNetUpdate();
+}
+
+void ABloodProcessingStation::UpdateMovePlacementPreview(
+	AWorkspaceRoom* PreviewWorkspaceRoom,
+	const FIntPoint PreviewAnchorCell,
+	const int32 PreviewRotationQuarterTurns,
+	const bool bPreviewIsValid,
+	UPlaceableStationDataAsset* PreviewStationDefinition)
+{
+	if (!HasAuthority() || !bMovePlacementInProgress)
+	{
+		return;
+	}
+
+	MovePreviewState.bActive = PreviewWorkspaceRoom != nullptr && PreviewStationDefinition != nullptr;
+	MovePreviewState.bValidPlacement = bPreviewIsValid;
+	MovePreviewState.RoomId = PreviewWorkspaceRoom ? PreviewWorkspaceRoom->RoomId : NAME_None;
+	MovePreviewState.WorkspaceRoom = PreviewWorkspaceRoom;
+	MovePreviewState.AnchorCell = PreviewAnchorCell;
+	MovePreviewState.RotationQuarterTurns = PreviewRotationQuarterTurns;
+	MovePreviewState.StationDefinition = PreviewStationDefinition;
+	OnRep_MovePreviewState();
+	ForceNetUpdate();
+}
+
+void ABloodProcessingStation::SetPlacementContext(AWorkspaceRoom* InWorkspaceRoom, const FGuid& InPlacedStationInstanceId, const FName& InOwningRoomId, const FIntPoint InGridAnchorCell, const int32 InRotationQuarterTurns)
+{
+	OwningWorkspaceRoom = InWorkspaceRoom;
+	PlacedStationInstanceId = InPlacedStationInstanceId;
+	if (InPlacedStationInstanceId.IsValid())
+	{
+		SavedActorGuid = InPlacedStationInstanceId;
+	}
+	OwningRoomId = InOwningRoomId;
+	GridAnchorCell = InGridAnchorCell;
+	RotationQuarterTurns = InRotationQuarterTurns;
+	RefreshPlacementTransformFromReplicatedState();
+}
+
+AWorkspaceRoom* ABloodProcessingStation::GetOwningWorkspaceRoom() const
+{
+	if (AWorkspaceRoom* WorkspaceRoom = OwningWorkspaceRoom.Get())
+	{
+		if (OwningRoomId.IsNone() || WorkspaceRoom->RoomId == OwningRoomId)
+		{
+			return WorkspaceRoom;
+		}
+	}
+
+	return ResolveOwningWorkspaceRoomFromReplicatedState();
+}
+
+bool ABloodProcessingStation::HasRegisteredPlacementContext() const
+{
+	if (!PlacedStationInstanceId.IsValid())
+	{
+		return false;
+	}
+
+	if (AWorkspaceRoom* WorkspaceRoom = GetOwningWorkspaceRoom())
+	{
+		return WorkspaceRoom->FindPlacementRecordByInstanceId(PlacedStationInstanceId) != nullptr;
+	}
+
+	return false;
+}
+
+AWorkspaceRoom* ABloodProcessingStation::ResolveOwningWorkspaceRoomFromReplicatedState() const
+{
+	if (!GetWorld())
+	{
+		return nullptr;
+	}
+
+	for (TActorIterator<AWorkspaceRoom> It(GetWorld()); It; ++It)
+	{
+		AWorkspaceRoom* WorkspaceRoom = *It;
+		if (!WorkspaceRoom)
+		{
+			continue;
+		}
+
+		if (!OwningRoomId.IsNone() && WorkspaceRoom->RoomId == OwningRoomId)
+		{
+			const_cast<ABloodProcessingStation*>(this)->OwningWorkspaceRoom = WorkspaceRoom;
+			return WorkspaceRoom;
+		}
+	}
+
+	if (!PlacedStationInstanceId.IsValid())
+	{
+		return nullptr;
+	}
+
+	for (TActorIterator<AWorkspaceRoom> It(GetWorld()); It; ++It)
+	{
+		AWorkspaceRoom* WorkspaceRoom = *It;
+		if (!WorkspaceRoom)
+		{
+			continue;
+		}
+
+		const bool bHasMatchingPlacementRecord = WorkspaceRoom->GetPlacedStations().ContainsByPredicate(
+			[this](const FWorkspacePlacedStationRecord& Record)
+			{
+				return Record.StationInstanceId == PlacedStationInstanceId;
+			});
+		if (!bHasMatchingPlacementRecord)
+		{
+			continue;
+		}
+
+		const_cast<ABloodProcessingStation*>(this)->OwningWorkspaceRoom = WorkspaceRoom;
+		return WorkspaceRoom;
+	}
+
+	return nullptr;
+}
+
+void ABloodProcessingStation::RefreshPlacementTransformFromReplicatedState()
+{
+	AWorkspaceRoom* WorkspaceRoom = GetOwningWorkspaceRoom();
+	if (!WorkspaceRoom)
+	{
+		return;
+	}
+
+	SetActorLocationAndRotation(
+		WorkspaceRoom->GetCellWorldLocation(GridAnchorCell),
+		WorkspaceRoom->GetPlacementWorldRotation(RotationQuarterTurns));
+}
+
+AWorkspaceRoom* ABloodProcessingStation::ResolveWorkspaceRoomById(const FName RoomIdToFind) const
+{
+	if (RoomIdToFind.IsNone() || !GetWorld())
+	{
+		return nullptr;
+	}
+
+	for (TActorIterator<AWorkspaceRoom> It(GetWorld()); It; ++It)
+	{
+		AWorkspaceRoom* WorkspaceRoom = *It;
+		if (WorkspaceRoom && WorkspaceRoom->RoomId == RoomIdToFind)
+		{
+			return WorkspaceRoom;
+		}
+	}
+
+	return nullptr;
+}
+
+void ABloodProcessingStation::SyncMovePreviewActor()
+{
+	if (!MovePreviewState.bActive || !MovePreviewState.StationDefinition || !GetWorld())
+	{
+		DestroyMovePreviewActor();
+		return;
+	}
+
+	if (CurrentOperator)
+	{
+		if (APlayerController* LocalPlayerController = GetWorld()->GetFirstPlayerController())
+		{
+			if (LocalPlayerController->IsLocalController() && LocalPlayerController->GetPawn() == CurrentOperator)
+			{
+				DestroyMovePreviewActor();
+				return;
+			}
+		}
+	}
+
+	AWorkspaceRoom* PreviewWorkspaceRoom = MovePreviewState.WorkspaceRoom
+		? MovePreviewState.WorkspaceRoom.Get()
+		: ResolveWorkspaceRoomById(MovePreviewState.RoomId);
+	if (!PreviewWorkspaceRoom)
+	{
+		DestroyMovePreviewActor();
+		return;
+	}
+
+	if (!MovePreviewActor)
+	{
+		FActorSpawnParameters SpawnParameters;
+		SpawnParameters.Owner = this;
+		SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		MovePreviewActor = GetWorld()->SpawnActor<AStationPlacementPreviewActor>(
+			AStationPlacementPreviewActor::StaticClass(),
+			PreviewWorkspaceRoom->GetCellWorldLocation(MovePreviewState.AnchorCell),
+			PreviewWorkspaceRoom->GetPlacementWorldRotation(MovePreviewState.RotationQuarterTurns),
+			SpawnParameters);
+	}
+
+	if (!MovePreviewActor)
+	{
+		return;
+	}
+
+	UStaticMesh* PreviewMesh = MovePreviewState.StationDefinition->PreviewMesh.LoadSynchronous();
+	MovePreviewActor->SetActorLocationAndRotation(
+		PreviewWorkspaceRoom->GetCellWorldLocation(MovePreviewState.AnchorCell),
+		PreviewWorkspaceRoom->GetPlacementWorldRotation(MovePreviewState.RotationQuarterTurns));
+	MovePreviewActor->ConfigurePreview(
+		PreviewMesh,
+		MovePreviewState.bValidPlacement);
+}
+
+void ABloodProcessingStation::DestroyMovePreviewActor()
+{
+	if (MovePreviewActor)
+	{
+		MovePreviewActor->Destroy();
+		MovePreviewActor = nullptr;
+	}
+}
+
+void ABloodProcessingStation::OnRep_PlacementState()
+{
+	RefreshPlacementTransformFromReplicatedState();
+}
+
+void ABloodProcessingStation::OnRep_MovePlacementState()
+{
+	if (ProcessingInteractable)
+	{
+		ProcessingInteractable->SetSuppressedByMovePlacement(bMovePlacementInProgress);
+	}
+
+	if (!bMovePlacementInProgress)
+	{
+		DestroyMovePreviewActor();
+	}
+}
+
+void ABloodProcessingStation::OnRep_MovePreviewState()
+{
+	SyncMovePreviewActor();
+}
+
 UInteractionPlacementTargetComponent* ABloodProcessingStation::ResolveManualPlacementTarget() const
 {
 	if (UActorComponent* ReferencedComponent = ManualPlacementTarget.GetComponent(const_cast<ABloodProcessingStation*>(this)))
 	{
-		return Cast<UInteractionPlacementTargetComponent>(ReferencedComponent);
+		if (UInteractionPlacementTargetComponent* PlacementTarget = Cast<UInteractionPlacementTargetComponent>(ReferencedComponent))
+		{
+			return PlacementTarget;
+		}
+	}
+
+	TArray<UInteractionPlacementTargetComponent*> PlacementTargets;
+	GetComponents<UInteractionPlacementTargetComponent>(PlacementTargets);
+	for (UInteractionPlacementTargetComponent* PlacementTarget : PlacementTargets)
+	{
+		if (PlacementTarget)
+		{
+			return PlacementTarget;
+		}
 	}
 
 	UE_LOG(
@@ -812,12 +1392,284 @@ UInteractionPlacementTargetComponent* ABloodProcessingStation::ResolveManualPlac
 
 USceneComponent* ABloodProcessingStation::ResolveManualPreviewSpawnPoint() const
 {
+	if (!ManualPreviewSpawnPointComponentName.IsNone())
+	{
+		TArray<USceneComponent*> SceneComponents;
+		GetComponents<USceneComponent>(SceneComponents);
+		for (USceneComponent* SceneComponent : SceneComponents)
+		{
+			if (SceneComponent
+				&& SceneComponent != GetRootComponent()
+				&& SceneComponent->GetFName() == ManualPreviewSpawnPointComponentName)
+			{
+				return SceneComponent;
+			}
+		}
+
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("BloodProcessingStation: ManualPreviewSpawnPointComponentName did not match any scene component station=%s componentName=%s"),
+			*GetNameSafe(this),
+			*ManualPreviewSpawnPointComponentName.ToString());
+	}
+
 	if (UActorComponent* ReferencedComponent = ManualPreviewSpawnPoint.GetComponent(const_cast<ABloodProcessingStation*>(this)))
 	{
-		return Cast<USceneComponent>(ReferencedComponent);
+		if (USceneComponent* ReferencedSceneComponent = Cast<USceneComponent>(ReferencedComponent))
+		{
+			if (ReferencedSceneComponent != GetRootComponent())
+			{
+				return ReferencedSceneComponent;
+			}
+		}
+	}
+
+	TArray<USceneComponent*> SceneComponents;
+	GetComponents<USceneComponent>(SceneComponents);
+	for (USceneComponent* SceneComponent : SceneComponents)
+	{
+		if (!SceneComponent || SceneComponent == GetRootComponent())
+		{
+			continue;
+		}
+
+		const FString ComponentName = SceneComponent->GetName();
+		if (ComponentName.Contains(TEXT("JugSpawn"), ESearchCase::IgnoreCase)
+			|| ComponentName.Contains(TEXT("PreviewSpawn"), ESearchCase::IgnoreCase)
+			|| ComponentName.Contains(TEXT("ManualPreview"), ESearchCase::IgnoreCase)
+			|| ComponentName.Contains(TEXT("SpawnPoint"), ESearchCase::IgnoreCase))
+		{
+			return SceneComponent;
+		}
 	}
 
 	return nullptr;
+}
+
+void ABloodProcessingStation::BootstrapEditorPlacedStationPlacement()
+{
+	if (!HasAuthority() || !bRegisterAsPlacedStationOnBeginPlay || HasRegisteredPlacementContext() || !GetWorld())
+	{
+		return;
+	}
+
+	FText BootstrapReason;
+	if (!EnsurePlacementRecordForCurrentTransform(BootstrapReason))
+	{
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("BloodProcessingStation: Failed to register level-authored placed station=%s reason=%s"),
+			*GetNameSafe(this),
+			*BootstrapReason.ToString());
+	}
+}
+
+const UPlaceableStationDataAsset* ABloodProcessingStation::ResolvePlacementDefinitionForBootstrap() const
+{
+	if (PlacementDefinitionOverride)
+	{
+		return PlacementDefinitionOverride;
+	}
+
+	for (TObjectIterator<UPlaceableStationDataAsset> It; It; ++It)
+	{
+		const UPlaceableStationDataAsset* PlacementDefinition = *It;
+		if (!PlacementDefinition || !PlacementDefinition->PlacedActorClass)
+		{
+			continue;
+		}
+
+		if (GetClass()->IsChildOf(PlacementDefinition->PlacedActorClass))
+		{
+			return PlacementDefinition;
+		}
+	}
+
+	return nullptr;
+}
+
+bool ABloodProcessingStation::TryBuildPlacementRecordForWorkspace(
+	AWorkspaceRoom* CandidateWorkspaceRoom,
+	FWorkspacePlacedStationRecord& OutPlacementRecord,
+	FText& OutReason) const
+{
+	OutPlacementRecord = FWorkspacePlacedStationRecord();
+	OutReason = FText::GetEmpty();
+
+	if (!CandidateWorkspaceRoom)
+	{
+		OutReason = LOCTEXT("BuildPlacementMissingWorkspace", "Geen geldige werkruimte beschikbaar voor stationregistratie.");
+		return false;
+	}
+
+	if (CandidateWorkspaceRoom->CellSize <= 0.0f)
+	{
+		OutReason = LOCTEXT("BuildPlacementInvalidWorkspace", "De werkruimte heeft een ongeldige cell size.");
+		return false;
+	}
+
+	const UPlaceableStationDataAsset* PlacementDefinition = ResolvePlacementDefinitionForBootstrap();
+	if (!PlacementDefinition)
+	{
+		OutReason = LOCTEXT("BuildPlacementMissingDefinition", "Geen placeable stationdefinitie gevonden voor dit station.");
+		return false;
+	}
+
+	const FVector LocalLocation = CandidateWorkspaceRoom->GetActorTransform().InverseTransformPosition(GetActorLocation());
+	const FIntPoint AnchorCell(
+		FMath::RoundToInt(LocalLocation.X / CandidateWorkspaceRoom->CellSize),
+		FMath::RoundToInt(LocalLocation.Y / CandidateWorkspaceRoom->CellSize));
+	const int32 LocalRotationTurns = ((FMath::RoundToInt((GetActorRotation().Yaw - CandidateWorkspaceRoom->GetActorRotation().Yaw) / 90.0f) % 4) + 4) % 4;
+	const FGuid StationInstanceId = PlacedStationInstanceId.IsValid() ? PlacedStationInstanceId : FGuid::NewGuid();
+
+	if (!CandidateWorkspaceRoom->ValidatePlacement(PlacementDefinition, AnchorCell, LocalRotationTurns, OutReason, &StationInstanceId))
+	{
+		return false;
+	}
+
+	OutPlacementRecord.StationInstanceId = StationInstanceId;
+	OutPlacementRecord.StationDefinition = const_cast<UPlaceableStationDataAsset*>(PlacementDefinition);
+	OutPlacementRecord.AnchorCell = AnchorCell;
+	OutPlacementRecord.RotationQuarterTurns = LocalRotationTurns;
+	return true;
+}
+
+bool ABloodProcessingStation::InferPlacementStateFromCurrentTransform(
+	AWorkspaceRoom*& OutWorkspaceRoom,
+	FIntPoint& OutAnchorCell,
+	int32& OutRotationQuarterTurns,
+	const UPlaceableStationDataAsset*& OutPlacementDefinition,
+	FText& OutReason) const
+{
+	OutWorkspaceRoom = nullptr;
+	OutAnchorCell = FIntPoint::ZeroValue;
+	OutRotationQuarterTurns = 0;
+	OutPlacementDefinition = ResolvePlacementDefinitionForBootstrap();
+	OutReason = FText::GetEmpty();
+
+	if (!GetWorld())
+	{
+		OutReason = LOCTEXT("InferPlacementNoWorld", "Wereldcontext ontbreekt voor placement-inferentie.");
+		return false;
+	}
+
+	if (!OutPlacementDefinition)
+	{
+		OutReason = LOCTEXT("InferPlacementNoDefinition", "Geen placeable stationdefinitie gevonden voor dit station.");
+		return false;
+	}
+
+	if (WorkspaceRoomOverride)
+	{
+		FWorkspacePlacedStationRecord PlacementRecord;
+		if (TryBuildPlacementRecordForWorkspace(WorkspaceRoomOverride, PlacementRecord, OutReason))
+		{
+			OutWorkspaceRoom = WorkspaceRoomOverride;
+			OutAnchorCell = PlacementRecord.AnchorCell;
+			OutRotationQuarterTurns = PlacementRecord.RotationQuarterTurns;
+			return true;
+		}
+
+		return false;
+	}
+
+	for (TActorIterator<AWorkspaceRoom> It(GetWorld()); It; ++It)
+	{
+		AWorkspaceRoom* WorkspaceRoom = *It;
+		if (!WorkspaceRoom || WorkspaceRoom->CellSize <= 0.0f)
+		{
+			continue;
+		}
+
+		FWorkspacePlacedStationRecord PlacementRecord;
+		FText ValidationReason;
+		if (!TryBuildPlacementRecordForWorkspace(WorkspaceRoom, PlacementRecord, ValidationReason))
+		{
+			continue;
+		}
+
+		OutWorkspaceRoom = WorkspaceRoom;
+		OutAnchorCell = PlacementRecord.AnchorCell;
+		OutRotationQuarterTurns = PlacementRecord.RotationQuarterTurns;
+		return true;
+	}
+
+	OutReason = LOCTEXT("InferPlacementNoWorkspaceFit", "Dit station kon niet aan een geldige werkruimte-gridpositie worden gekoppeld.");
+	return false;
+}
+
+bool ABloodProcessingStation::TryInferCurrentPlacementContext(
+	AWorkspaceRoom*& OutWorkspaceRoom,
+	FIntPoint& OutAnchorCell,
+	int32& OutRotationQuarterTurns,
+	const UPlaceableStationDataAsset*& OutPlacementDefinition,
+	FText& OutReason) const
+{
+	return InferPlacementStateFromCurrentTransform(
+		OutWorkspaceRoom,
+		OutAnchorCell,
+		OutRotationQuarterTurns,
+		OutPlacementDefinition,
+		OutReason);
+}
+
+bool ABloodProcessingStation::EnsurePlacementRecordForCurrentTransform(FText& OutReason)
+{
+	OutReason = FText::GetEmpty();
+
+	if (!HasAuthority())
+	{
+		OutReason = LOCTEXT("EnsurePlacementRecordServerOnly", "Plaatsingsrecords kunnen alleen server-side worden aangemaakt.");
+		return false;
+	}
+
+	if (HasRegisteredPlacementContext())
+	{
+		return true;
+	}
+
+	AWorkspaceRoom* WorkspaceRoom = nullptr;
+	FIntPoint AnchorCell = FIntPoint::ZeroValue;
+	int32 RotationTurns = 0;
+	const UPlaceableStationDataAsset* PlacementDefinition = nullptr;
+	if (!InferPlacementStateFromCurrentTransform(WorkspaceRoom, AnchorCell, RotationTurns, PlacementDefinition, OutReason))
+	{
+		return false;
+	}
+
+	const FGuid StationInstanceId = PlacedStationInstanceId.IsValid() ? PlacedStationInstanceId : FGuid::NewGuid();
+	FWorkspacePlacedStationRecord PlacementRecord;
+	PlacementRecord.StationInstanceId = StationInstanceId;
+	PlacementRecord.StationDefinition = const_cast<UPlaceableStationDataAsset*>(PlacementDefinition);
+	PlacementRecord.AnchorCell = AnchorCell;
+	PlacementRecord.RotationQuarterTurns = RotationTurns;
+
+	return WorkspaceRoom->RegisterPlacedStationActor(this, PlacementRecord, OutReason);
+}
+
+bool ABloodProcessingStation::ValidateManualPreviewSetup(FText& OutReason) const
+{
+	if (!ManualPreviewActorClass)
+	{
+		OutReason = LOCTEXT("ManualPreviewValidateMissingClass", "Manual preview actor class ontbreekt.");
+		return false;
+	}
+
+	if (!ResolveManualPreviewSpawnPoint())
+	{
+		OutReason = LOCTEXT("ManualPreviewValidateMissingSpawnPoint", "Manual preview spawn point ontbreekt.");
+		return false;
+	}
+
+	if (!ResolveManualPlacementTarget())
+	{
+		OutReason = LOCTEXT("ManualPreviewValidateMissingPlacementTarget", "Manual placement target ontbreekt.");
+		return false;
+	}
+
+	return true;
 }
 
 void ABloodProcessingStation::HandleManualPlacementConfirmed(
@@ -855,7 +1707,7 @@ void ABloodProcessingStation::HandleManualPlacementConfirmed(
 
 float ABloodProcessingStation::GetProcessingDurationTimeUnits() const
 {
-	return static_cast<float>(GetStoredBatchProcessingDurationDays()) * TimeUnitsPerDay;
+	return static_cast<float>(GetStoredBatchProcessingDurationDays()) * StationTimeUnitsPerDay;
 }
 
 float ABloodProcessingStation::GetProcessingElapsedTimeUnits(const float CurrentAccumulatedTime) const
@@ -1035,12 +1887,12 @@ bool ABloodProcessingStation::CommitProcessingStartRequest(UOwnSystemInventoryCo
 	}
 
 	const float CurrentAccumulatedTime = GetStationOwnSystemAccumulatedTime(this);
-	const float DurationTimeUnits = static_cast<float>(GetStoredBatchProcessingDurationDays()) * TimeUnitsPerDay;
+	const float DurationTimeUnits = static_cast<float>(GetStoredBatchProcessingDurationDays()) * StationTimeUnitsPerDay;
 
 	ProcessingStartAccumulatedTime = CurrentAccumulatedTime;
 	ProcessingReadyAccumulatedTime = ProcessingStartAccumulatedTime + DurationTimeUnits;
 	ProcessingStartDay = Economy->GetCurrentSimDay();
-	ProcessingReadyDay = FMath::FloorToInt(ProcessingReadyAccumulatedTime / TimeUnitsPerDay);
+	ProcessingReadyDay = FMath::FloorToInt(ProcessingReadyAccumulatedTime / StationTimeUnitsPerDay);
 	StationState = DurationTimeUnits <= 0.0f ? EBloodVatStationState::Klaar : EBloodVatStationState::Rijpt;
 	ForceNetUpdate();
 
@@ -1151,6 +2003,24 @@ void ABloodProcessingStation::ClearStagedManualProcessingRequest()
 	ForceNetUpdate();
 }
 
+bool ABloodProcessingStation::CancelManualProcessingRequest(FText& OutReason)
+{
+	OutReason = FText::GetEmpty();
+
+	if (!HasStagedManualProcessingRequest())
+	{
+		OutReason = LOCTEXT("ManualCancelNoRequest", "Er staat geen batch klaar om te annuleren.");
+		return false;
+	}
+
+	ClearStagedManualProcessingRequest();
+
+	OutReason = FText::Format(
+		LOCTEXT("ManualCancelSuccessFmt", "{0}: batch geannuleerd. De jug is van tafel gehaald."),
+		StationDisplayName);
+	return true;
+}
+
 bool ABloodProcessingStation::HasStagedManualProcessingRequest() const
 {
 	return bHasStagedManualStartRequest;
@@ -1228,8 +2098,12 @@ bool ABloodProcessingStation::SpawnManualPreviewActorForRequest(const FBloodProc
 
 	if (PhysicsComponent)
 	{
+		PhysicsComponent->SetSimulatePhysics(true);
+		PhysicsComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		PhysicsComponent->SetEnableGravity(true);
 		PhysicsComponent->SetPhysicsLinearVelocity(FVector::ZeroVector);
 		PhysicsComponent->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+		PhysicsComponent->SetWorldLocation(SpawnPoint->GetComponentLocation() + FVector(0.0f, 0.0f, 8.0f));
 		PhysicsComponent->WakeAllRigidBodies();
 	}
 
@@ -1256,23 +2130,17 @@ void ABloodProcessingStation::HandleInteractionCancelPressed()
 		return;
 	}
 
-	ABloodPackagingStation* PackagingStation = Cast<ABloodPackagingStation>(this);
-	if (!PackagingStation)
-	{
-		return;
-	}
-
 	APawn* Interactor = ActiveInteractor.Get();
 	UVampireEconomyComponent* Economy = UVampireEconomyComponent::ResolveEconomyFromActor(Interactor);
 	if (Economy && Economy->GetOwnerRole() < ROLE_Authority)
 	{
 		FText RequestReason;
-		Economy->RequestCancelReservedPackaging(PackagingStation, RequestReason);
+		Economy->RequestCancelManualProcessing(this, RequestReason);
 		return;
 	}
 
 	FText OutReason;
-	const bool bCancelled = PackagingStation->CancelReservedPackagingRequest(OutReason);
+	const bool bCancelled = CancelManualProcessingRequest(OutReason);
 	if (!OutReason.IsEmpty())
 	{
 		if (Interactor && Economy)
